@@ -81,7 +81,7 @@ export NACOS_PASSWORD
 .venv/bin/python nacos_agent.py register --publish
 ```
 
-在 Nacos 控制台依次打开「AI 管理中心 → Agent 管理 → Friday → 运行时端点」，选择 `1.0.0` 版本和 `a2a` 协议，确认地址为 `http://127.0.0.1:9999` 且状态健康。后续重启注册进程时，运行 `.venv/bin/python nacos_agent.py register`，复用已发布的定义。 [Nacos 端点注册与心跳](https://nacos.io/docs/latest/manual/user/ai/rad-discovery/)
+在 Nacos 控制台依次打开「AI 管理中心 → Agent 管理 → Friday → 运行时端点」，选择 `1.0.0` 版本和 `a2a` 协议，确认地址为 `http://127.0.0.1:9999` 且状态健康。注册或注销后，Nacos 可能需要几秒刷新端点状态。后续重启注册进程时，运行 `.venv/bin/python nacos_agent.py register`，复用已发布的定义。 [Nacos 端点注册与心跳](https://nacos.io/docs/latest/manual/user/ai/rad-discovery/)
 
 同一个 Agent 可有多个运行端点。例如在另一终端用 `--port 10000` 启动第二个 Friday，再运行 `nacos_agent.py register --card-url http://127.0.0.1:10000/.well-known/agent-card.json`。每个实例使用自己的地址和注册进程。
 
