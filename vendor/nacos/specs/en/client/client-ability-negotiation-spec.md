@@ -1,0 +1,216 @@
+<!--
+  Copyright 1999-2026 Alibaba Group Holding Ltd.
+
+  Licensed under the Apache License, Version 2.0 (the "License");
+  you may not use this file except in compliance with the License.
+  You may obtain a copy of the License at
+
+       http://www.apache.org/licenses/LICENSE-2.0
+
+  Unless required by applicable law or agreed to in writing, software
+  distributed under the License is distributed on an "AS IS" BASIS,
+  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+  See the License for the specific language governing permissions and
+  limitations under the License.
+-->
+
+# Nacos Client Ability Negotiation Spec
+
+This document defines client-side ability negotiation for Nacos runtime
+connections. It expands the ability part of the
+[Client Runtime Spec](client-runtime-spec.md) and complements the gRPC setup
+rules in the [gRPC API Spec](../grpc-api/api-spec.md).
+
+## 1. Ability Model
+
+An ability is a named boolean feature flag scoped by an `AbilityMode`.
+
+| Mode | Holder | Purpose |
+|------|--------|---------|
+| `SERVER` | Nacos server node | Describes server-side support visible to SDK clients or cluster clients. |
+| `SDK_CLIENT` | Runtime SDK client | Describes features the SDK client can use or receive. |
+| `CLUSTER_CLIENT` | Server-to-server client | Describes internal cluster client features. |
+
+Ability names must be unique inside a mode. The ability key definition is the
+compatibility registry for both sides of the connection.
+
+## 2. Current SDK And Server Abilities
+
+The current Java SDK declares support for:
+
+| SDK ability | Meaning |
+|-------------|---------|
+| `SDK_CLIENT_FUZZY_WATCH` | Client can use fuzzy watch for Config or Naming. |
+| `SDK_CLIENT_DISTRIBUTED_LOCK` | Client can use the distributed lock feature. |
+| `SDK_MCP_REGISTRY` | Client can use MCP registry runtime features. |
+| `SDK_AGENT_REGISTRY` | Client can use the legacy A2A Agent and AgentCard runtime features. |
+
+The current server declares support for:
+
+| Server ability | Meaning |
+|----------------|---------|
+| `SERVER_PERSISTENT_INSTANCE_BY_GRPC` | Persistent Naming instance register/deregister is supported by gRPC. |
+| `SERVER_FUZZY_WATCH` | Config or Naming fuzzy watch is supported. |
+| `SERVER_DISTRIBUTED_LOCK` | Distributed Lock is supported. |
+| `SERVER_MCP_REGISTRY` | MCP registry operations are supported. |
+| `SERVER_MCP_DRAFT_RELEASE` | MCP release understands the `createDraft` field. |
+| `SERVER_AGENT_REGISTRY` | Legacy A2A Agent and AgentCard registry operations are supported. |
+| `SERVER_AGENT_CARD_V1` | A2A AgentCard 1.0 protocol fields are supported. |
+
+Adding a new ability requires both a named key and a domain rule that explains
+what behavior is gated by the ability.
+
+### 2.1 Agent/RAD Abilities
+
+The [Agent API Spec](../ai/agent-api-spec.md) approves the following server
+abilities for the Nacos 3.3 line. They enter the server ability table after
+their handlers and Java SDK form a complete implementation.
+
+| Mode | Constant | Wire key | Meaning |
+|---|---|---|---|
+| `SERVER` | `SERVER_RAD_V1` | `radV1` | Server accepts the complete Nacos 3.3 RAD v1 base contract. |
+| `SERVER` | `SERVER_RAD_WATCH_V1` | `radWatchV1` | Server accepts Subscribe, Unsubscribe, and fingerprint Hint binding payloads. |
+| `SDK_CLIENT` | `SDK_RAD_WATCH_V1` | `radWatchV1` | Client accepts and acknowledges fingerprint Hint push payloads. |
+
+Base RAD and Watch are independent deployment units. gRPC server-aware Watch
+is enabled only when the current connection reports both Watch abilities. If
+either is absent or unknown, the client must not send Watch payloads and uses
+the documented HTTP Watch or local Discover-polling fallback. Legacy
+`SERVER_AGENT_REGISTRY`, `SERVER_AGENT_CARD_V1`, and `SDK_AGENT_REGISTRY`
+continue to gate only the old A2A contract. They are not a fallback for any RAD
+operation.
+
+### 2.2 MCP Draft Release Ability
+
+| Mode | Constant | Wire key | Meaning |
+|---|---|---|---|
+| `SERVER` | `SERVER_MCP_DRAFT_RELEASE` | `mcpDraftRelease` | The selected server understands `ReleaseMcpServerRequest.createDraft` and will not reinterpret it as historical direct-online release. |
+
+The ability does not assert that cluster migration has reached
+`LIFECYCLE_MANAGED`; that remains a dynamic server-side precondition. A client
+sending `createDraft=true` requires `SUPPORTED` strictly. `NOT_SUPPORTED` and
+`UNKNOWN` both produce `SERVER_NOT_IMPLEMENTED` before send, with no fallback
+or replay. Historical release with the field absent or `false` continues to
+require only `SERVER_MCP_REGISTRY`.
+
+## 3. gRPC Negotiation Flow
+
+The runtime client negotiates abilities during gRPC connection setup:
+
+1. The client opens a channel to the selected server and sends
+   `ServerCheckRequest`.
+2. The server returns `ServerCheckResponse` with a connection id and a flag that
+   indicates whether ability negotiation is supported.
+3. The client opens the bidirectional stream and sends `ConnectionSetupRequest`
+   with client version, labels, namespace/tenant, and the current client ability
+   table for the connection mode.
+4. If the server supports ability negotiation, the client waits for
+   `SetupAckRequest`.
+5. `SetupAckRequest` carries the server ability table. The client stores it on
+   the current connection.
+6. If the server declared ability negotiation support but no ability table is
+   received before the configured timeout, the client must abandon that
+   connection attempt.
+7. If the server does not support ability negotiation, the client may complete
+   setup for compatibility. Ability checks on that connection resolve to
+   `UNKNOWN` unless the implementation defines an explicit legacy fallback.
+
+Ability state is connection-scoped. Reconnect creates a new connection and must
+refresh the ability table.
+
+## 4. Ability Status Semantics
+
+Client code observes ability status as:
+
+| Status | Meaning | Required behavior |
+|--------|---------|-------------------|
+| `SUPPORTED` | The current connection explicitly supports the ability. | The gated feature may use the optimized or new path. |
+| `NOT_SUPPORTED` | The current connection explicitly does not support the ability. | The feature must use a documented fallback or fail with a clear unsupported error. |
+| `UNKNOWN` | No ability table is available or the key is absent. | The feature must not assume support. It may use a legacy fallback only when the domain spec permits it. |
+
+Unknown is not success. New features should prefer fail-fast unsupported errors
+over sending requests that the selected server may not understand.
+
+## 5. Feature Gating Rules
+
+Domain clients must check server abilities before using optional or versioned
+features:
+
+- Naming persistent instance registration should use gRPC only when
+  `SERVER_PERSISTENT_INSTANCE_BY_GRPC` is supported; otherwise it may use the
+  documented HTTP compatibility path.
+- Config and Naming fuzzy watch must require `SERVER_FUZZY_WATCH`.
+- Distributed Lock must require `SERVER_DISTRIBUTED_LOCK` because the feature is
+  experimental and not universally available.
+- AI MCP registry operations must require `SERVER_MCP_REGISTRY`.
+- MCP draft release must additionally require `SERVER_MCP_DRAFT_RELEASE`.
+- Legacy A2A Agent and AgentCard operations must require
+  `SERVER_AGENT_REGISTRY`.
+- A2A AgentCard 1.0 fields should require `SERVER_AGENT_CARD_V1` or use an
+  explicitly documented compatibility conversion.
+- RAD definition publication, Search and Discover, and runtime Endpoint
+  publication must require `SERVER_RAD_V1`.
+- gRPC RAD Watch must require both `SERVER_RAD_WATCH_V1` and
+  `SDK_RAD_WATCH_V1`; local polling fallback requires only the base Discover
+  ability.
+
+Feature code should not cache a positive ability result beyond the current
+connection. It should query the runtime connection ability when the operation is
+about to execute or when a cached value is known to belong to the current
+connection.
+
+After reconnect, the client must negotiate abilities again before restoring
+Endpoint publications or gRPC Wire Watches. Canonical local Watch intent
+survives the connection, but every old wire key is discarded. When Watch is no
+longer negotiated, recovery uses the documented transport or polling fallback.
+
+## 6. Compatibility Rules
+
+Ability negotiation is a mixed-version compatibility mechanism. It should be
+used before adding ad hoc version checks. Version strings may be logged or used
+for diagnostics, but runtime behavior should prefer ability status whenever an
+ability key exists.
+
+Legacy fallback must be documented by the domain spec. A fallback can be
+removed only according to the
+[Compatibility And Deprecation Spec](../design/compatibility-deprecation-spec.md).
+
+## 7. Pending Issues
+
+- The public list of ability keys should be generated from source to avoid
+  documentation drift.
+
+## AI Client HTTP capabilities
+
+`GET /v3/client/ai/capabilities` returns `Result` with
+`data.schemaVersion=1` and Boolean `data.capabilities` keys `radV1`, `mcp`,
+`skill`, `prompt`, and `agentSpec`. These describe the responding Client HTTP
+binding only, not gRPC reachability, cluster-wide support, resource permission,
+or migration readiness. RAD includes HTTP Watch; no separate public Watch or
+A2A compatibility flag is added. Existing gRPC ability keys keep their meaning.
+
+The standard Client auth flow uses `OPEN_API + AI + READ + ONLY_IDENTITY` and
+an explicit resource-less parser. A valid identity with no resource grants may
+query it; missing/invalid credentials are rejected when Client auth applies,
+even when AI anonymous access is enabled. Client auth-off and normal plugin or
+internal-identity bypasses retain existing behavior. Admin/Console auth toggles
+are independent. Extra resource parameters and Client-id headers are ignored;
+this read neither accesses resources nor creates or renews a Client/Publisher.
+
+The SDK preserves per-feature `SUPPORTED`, `NOT_SUPPORTED`, and `UNKNOWN`.
+Only a Boolean in a valid schema-version-1 response provides evidence. Missing
+or wrongly typed keys remain unknown; unknown keys are ignored. Unknown schema,
+empty/malformed responses and capability-route 404/405 do not prove RAD absent.
+Authentication and connectivity failures retain their error classification.
+Cache entries are bounded, short-lived, coalesce concurrent requests, and are
+isolated by target URL (including context path/HTTP scheme) and a digest of the
+identity context; credentials are not retained as plaintext cache keys.
+
+Capability evidence is separate from the SDK instance's A2A routing choice.
+A reliably selected legacy mode remains legacy through reconnect and refresh,
+until shutdown/reinstantiation. Unknown RAD plus a reliable legacy A2A binding
+can choose that binding without claiming native RAD is unsupported. Unknown
+alone never fixes legacy mode. Native RAD still uses actual target evidence;
+an ordinary successful RAD call can provide positive evidence without an
+additional probe write. C06 prepares these components; the legacy facade is
+connected to them only when all adaptation paths are enabled together.

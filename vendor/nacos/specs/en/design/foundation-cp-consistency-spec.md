@@ -1,0 +1,296 @@
+<!--
+  Copyright 1999-2026 Alibaba Group Holding Ltd.
+
+  Licensed under the Apache License, Version 2.0 (the "License");
+  you may not use this file except in compliance with the License.
+  You may obtain a copy of the License at
+
+       http://www.apache.org/licenses/LICENSE-2.0
+
+  Unless required by applicable law or agreed to in writing, software
+  distributed under the License is distributed on an "AS IS" BASIS,
+  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+  See the License for the specific language governing permissions and
+  limitations under the License.
+-->
+
+# Nacos CP Consistency Spec
+
+This document defines the CP-oriented consistency foundation used by Nacos. It
+expands the CP consistency part of the
+[Foundation Capabilities Spec](foundation-capabilities-spec.md).
+
+## 1. Positioning
+
+AP and CP are CAP-theory consistency choices. In Nacos, a CP path prioritizes
+strongly ordered committed state under partition tolerance. When quorum, leader,
+or a protocol group is unavailable, a CP operation may fail or become
+temporarily unavailable instead of accepting divergent writes.
+
+The current built-in CP implementation is JRaft through `JRaftProtocol`.
+Nacos may load a `CPProtocol` implementation through SPI, but the supported
+in-repository CP semantics are defined by Raft/JRaft.
+
+## 2. CP Resource Rules
+
+CP state is appropriate for resources with these characteristics:
+
+- durable state owned by management or server-side control paths;
+- state that must survive client disappearance and server restart;
+- operator or developer intent that must override runtime registration;
+- writes that require a single commit order inside a logical group;
+- state that can be recovered from snapshots and committed logs.
+
+CP state is not appropriate for high-frequency disposable runtime state when AP
+eventual convergence is enough. Those resources should use the
+[AP Consistency Spec](foundation-ap-consistency-spec.md).
+
+CP consumers must define:
+
+- Raft group name and ownership;
+- write request shape and operation values;
+- read request shape and read visibility;
+- deterministic `onApply` behavior;
+- snapshot save/load shape and compatibility;
+- leader or readiness requirements for user-visible operations;
+- error behavior when the group has no leader, no processor, or no quorum.
+
+## 3. Protocol Model
+
+The shared consistency interface is `ConsistencyProtocol`. CP specializes it as
+`CPProtocol`.
+
+The CP model is:
+
+```text
+ProtocolManager
+  -> CPProtocol(JRaftProtocol)
+  -> RequestProcessor4CP per group
+  -> JRaftServer multi-raft group
+  -> NacosStateMachine
+  -> processor.onApply / processor.onRequest
+  -> snapshot operations
+```
+
+`ProtocolManager` injects CP members as `ip:raftPort` addresses. Member change
+events are propagated to the CP protocol asynchronously.
+
+## 4. Request Processor Contract
+
+Each CP domain integrates by registering a `RequestProcessor4CP`.
+
+Processor rules:
+
+- `group()` must return a stable unique group name;
+- one group should have one authoritative processor in the server runtime;
+- `onApply(WriteRequest)` must be deterministic and must not depend on slow
+  remote IO;
+- `onRequest(ReadRequest)` must return a response consistent with the group's
+  read rule;
+- `loadSnapshotOperate()` must declare snapshot operations when the group needs
+  snapshot recovery;
+- processors must treat unknown operations as explicit failures;
+- processors must publish domain events only after committed apply has updated
+  local state, following the
+  [Event Dispatch And NotifyCenter Spec](foundation-event-dispatch-spec.md).
+
+The processor owns domain semantics. The CP foundation owns group routing,
+leader forwarding, log commit, read-index handling, metadata, and snapshot
+integration.
+
+## 5. JRaft Runtime Rules
+
+JRaft is used as a multi-group CP runtime.
+
+Rules:
+
+- each `RequestProcessor4CP` creates one Raft group;
+- writes are submitted to the group leader or forwarded to the current leader;
+- committed logs are applied through `NacosStateMachine`;
+- follower replay applies committed writes but ignores follower-local read
+  entries without a closure;
+- read paths first try Raft read-index and may fall back to leader read;
+- `protocolMetaData()` tracks leader, term, group members, and errors;
+- `isReady()` indicates that the protocol has started and, in strict mode,
+  that groups have leaders;
+- member removal is handled through Raft peer-change commands; joining nodes
+  register themselves when starting.
+
+Implementation timeouts are operational defaults, not public API guarantees.
+Domain specs must not expose JRaft timeout values as user-visible correctness
+contracts unless a domain API explicitly defines them.
+
+### Raft Log Request Encoding
+
+Raft task data uses a two-byte request type prefix followed by the serialized
+Protobuf request. The first byte is `0x38` (field 7, varint); the second byte is
+`1` for `ReadRequest` or `2` for `WriteRequest`. Follower apply and log recovery
+must use this prefix to distinguish reads from writes. Missing or truncated
+prefixes, unknown request types, and malformed Protobuf data must fail with
+`ConsistencyException`; unknown types must not be treated as writes. Protobuf
+parse failures retain their cause, and debug diagnostics must not include the
+request payload.
+
+In Nacos 3.3, the untagged `GetRequest` / `Log` fallback and its conversion
+helpers are removed. The tagged format introduced in Nacos 2.1.0 remains
+supported. This is an internal Raft log contract, not a public Java SDK or
+HTTP API change.
+
+An existing data directory can still contain untagged entries from older
+releases, including Nacos 2.0.x, even after an intermediate upgrade. Before
+upgrading to a release without the fallback, operators must finish recovery
+and snapshot/log migration using a release that can read those entries.
+Changing the running version alone does not convert persisted logs. Direct
+replay of untagged entries is no longer supported and must fail explicitly.
+
+### JRaft Transport Authentication
+
+Nacos uses the JRaft gRPC transport without the optional Bolt transport or SOFA
+Hessian dependency. The Nacos RPC factory must construct both clients and servers
+on that classpath, sharing registered Protobuf parsers and response marshallers.
+Server creation preserves JRaft 1.4.1 endpoint binding: a non-blank endpoint IP
+selects the listen address, while a blank IP uses a wildcard address. The existing
+`jraft.grpc.max_inbound_message_size.bytes` property and configuration helper
+remain effective before server startup.
+
+JRaft native gRPC is an inner server-to-server transport. New JRaft clients
+always attach the configured Nacos server identity through gRPC
+`CallCredentials`, and the server always validates it in a
+`ServerInterceptor` before dispatching to a JRaft processor.
+
+Rolling upgrade uses a temporary two-state transition:
+
+```text
+COMPATIBLE -> ENFORCED
+```
+
+In `COMPATIBLE`, missing or invalid credentials are rate-limited and logged but
+the request continues, because an old member cannot attach credentials. Each
+new member publishes the temporary `supportJraftAuth=true` capability. After
+every member in the complete membership view reports the capability, the local
+server automatically and irreversibly enters `ENFORCED`. In `ENFORCED`, a
+missing or invalid credential is rejected with gRPC `UNAUTHENTICATED` before
+processor execution.
+
+The transition is monotonic. Member additions, removals, or metadata updates
+must not return an enforced process to compatibility. Runtime enforcement is
+latched before writing `{nacos.home}/data/jraft-auth-enforced.state`; a marker
+write failure must not delay enforcement and must be retried by later scheduled
+checks. A server that finds the state file on restart enforces authentication
+immediately. The state file contains no server identity or member data and is
+not an operator rollback switch.
+
+Capability discovery, compatible admission, transition, and state-file handling
+belong to one isolated compatibility component. That component is deprecated
+from its introduction, documents removal in Nacos 4.0.0, and must not own the
+permanent credential parser or validator. Nacos 4.0.0 removes the component and
+always enforces JRaft server identity.
+
+After enforcement, a mixed-version rolling downgrade to members without JRaft
+credentials is not lossless or guaranteed available. Old clients cannot call
+new enforced servers, so leader election, replication, ReadIndex, leader
+forwarding, snapshots, and CLI operations may fail depending on group leader
+and quorum placement.
+
+## 6. Current CP Consumers
+
+| Group | Owner | Purpose |
+| --- | --- | --- |
+| `nacos_config` | Persistence and Config embedded storage | Replicate embedded storage operations and make Config dump wait for readable committed state. |
+| `naming_persistent_service_v2` | Naming | Replicate persistent instance register, update, and deregister operations. |
+| `naming_service_metadata` | Naming | Replicate service metadata and cluster metadata. |
+| `naming_instance_metadata` | Naming | Replicate operational instance metadata. |
+| `naming_persistent_service` | Naming operations | Replicate legacy naming switch/domain state. |
+| `plugin_state` | Core plugin | Replicate plugin state and runtime configuration changes when the built-in Raft synchronizer is selected. |
+
+New CP consumers must add their group to the relevant domain spec and define the
+resource semantics that the group commits.
+
+## 7. Read And Write Semantics
+
+Write rules:
+
+- a write request must include group, operation, and serialized data;
+- success means the write was accepted and applied according to the group's
+  processor contract;
+- failure must be surfaced to callers instead of being silently retried as a
+  user-visible success;
+- domain apply logic must be idempotent or guarded when duplicate submissions
+  are possible at the caller layer;
+- writes must not publish events before committed apply.
+
+The Core plugin domain treats `plugin_state` as the built-in Raft
+synchronizer's optional runtime resource, not a prerequisite for constructing
+the Spring context. Standalone mode and clusters that explicitly select a
+custom `PluginStateSynchronizerProvider` do not register this group. The
+processor must not initialize CP or register the group from a bean constructor.
+After local plugin state and configuration have been accepted, Core starts
+default Raft synchronizer and group initialization asynchronously. CP
+initialization or group registration failure is logged and marks cluster plugin
+writes unavailable, but does not fail Nacos startup. Calls that require this
+group must return an explicit server error while it is unavailable; they must
+not silently execute as standalone writes or switch to another synchronizer.
+
+Read rules:
+
+- a read request must include the target group and serialized query data;
+- the group processor defines whether a read is supported and what state it
+  reads;
+- read-index failure may fall back to leader read;
+- if a domain reads from local cache outside CP, it must document stale-read
+  tolerance in its domain spec.
+
+## 8. Snapshot And Recovery
+
+Snapshot rules:
+
+- a group with recoverable state should provide `SnapshotOperation` entries;
+- snapshot format and compatibility are owned by the domain processor;
+- snapshot save/load must preserve enough data to rebuild serving state after
+  restart;
+- an archive entry used during snapshot recovery must resolve within the
+  snapshot reader destination; absolute, directory-control, and escaping paths
+  must be rejected before creating directories or writing files;
+- snapshot archives must emit `/` separators, and recovery must treat both `/`
+  and `\\` as entry separators when applying absolute-path, directory-control,
+  and containment checks;
+- groups without snapshot operations rely on log replay or separate persistence;
+- domain specs must define how snapshot recovery interacts with local cache and
+  derived indexes.
+
+For embedded Config storage, startup waits for CP metadata indicating readable
+data before dump recovery continues. That wait is a Config persistence rule
+built on the CP foundation and the
+[Persistence And Dump Spec](foundation-persistence-dump-spec.md).
+
+## 9. Boundary Rules
+
+- CP consistency is strong ordered commit within a group, not a guarantee that
+  every interface reads through CP.
+- CP groups own committed domain state, not transport retries, SDK redo, or AP
+  runtime state.
+- JRaft groups must not be used to serialize high-frequency ephemeral state
+  unless the domain spec explicitly requires CP semantics.
+- A CP processor must not redefine public API fields, resource identity, or
+  authorization rules.
+- CP metadata is operational protocol state. It may be exposed through
+  authorized ops APIs, but it is not a domain resource identity.
+- Replacing the CP implementation must preserve the `CPProtocol`,
+  `RequestProcessor4CP`, group, snapshot, metadata, and error semantics defined
+  here.
+- Optional-domain registration failure may be isolated from server startup only
+  when the owning domain spec defines a local read view and explicit unavailable
+  write behavior. This exception does not weaken readiness requirements for
+  critical CP-backed domains such as embedded Config storage.
+
+## 10. Related Specs
+
+- [Foundation Capabilities Spec](foundation-capabilities-spec.md)
+- [AP Consistency Spec](foundation-ap-consistency-spec.md)
+- [Persistence And Dump Spec](foundation-persistence-dump-spec.md)
+- [Event Dispatch And NotifyCenter Spec](foundation-event-dispatch-spec.md)
+- [Cluster Membership Spec](foundation-cluster-membership-spec.md)
+- [Config Spec](../config/config-spec.md)
+- [Config Persistence, Dump, And History Spec](../config/config-persistence-history-spec.md)
+- [Naming Consistency And Client State Spec](../naming/naming-consistency-client-spec.md)
+- [Auth And Permission Spec](../auth/auth-permission-spec.md)

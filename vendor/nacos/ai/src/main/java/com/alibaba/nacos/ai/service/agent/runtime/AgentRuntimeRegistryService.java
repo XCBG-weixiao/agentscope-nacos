@@ -1,0 +1,476 @@
+/*
+ * Copyright 1999-2026 Alibaba Group Holding Ltd.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package com.alibaba.nacos.ai.service.agent.runtime;
+
+import com.alibaba.nacos.ai.constant.Constants;
+import com.alibaba.nacos.ai.service.agent.fingerprint.RuntimeEndpointRevision;
+import com.alibaba.nacos.ai.service.agent.identity.RadServiceNameComposer;
+import com.alibaba.nacos.ai.service.agent.metadata.AgentVersionComparator;
+import com.alibaba.nacos.api.ai.model.agent.Endpoint;
+import com.alibaba.nacos.api.ai.model.agent.AgentCallInterface;
+import com.alibaba.nacos.api.ai.model.agent.EndpointSource;
+import com.alibaba.nacos.api.ai.model.agent.RuntimeEndpointSnapshot;
+import com.alibaba.nacos.api.ai.model.agent.RuntimeVersionBinding;
+import com.alibaba.nacos.api.ai.model.agent.AgentEndpointRegistrationBatch;
+import com.alibaba.nacos.api.ai.model.agent.EndpointSet;
+import com.alibaba.nacos.api.ai.utils.AgentModelValidator;
+import com.alibaba.nacos.api.ai.utils.AgentValidationUtils;
+import com.alibaba.nacos.api.ai.utils.EndpointCanonicalizer;
+import com.alibaba.nacos.api.ai.utils.EndpointNaturalKey;
+import com.alibaba.nacos.api.ai.utils.RadModelValidator;
+import com.alibaba.nacos.api.exception.NacosException;
+import com.alibaba.nacos.api.exception.api.NacosApiException;
+import com.alibaba.nacos.api.exception.runtime.NacosRuntimeException;
+import com.alibaba.nacos.api.model.v2.ErrorCode;
+import com.alibaba.nacos.api.naming.pojo.Instance;
+import com.alibaba.nacos.api.naming.pojo.ServiceInfo;
+import com.alibaba.nacos.api.naming.utils.NamingUtils;
+import com.alibaba.nacos.naming.core.v2.index.ServiceStorage;
+import com.alibaba.nacos.naming.core.v2.pojo.Service;
+import com.alibaba.nacos.naming.core.v2.service.impl.EphemeralClientOperationServiceImpl;
+import org.springframework.stereotype.Component;
+
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.Comparator;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Objects;
+import java.util.Set;
+import java.util.TreeMap;
+import java.util.TreeSet;
+
+/**
+ * Agent Runtime Registry backed directly by Naming client publications.
+ *
+ * <p>One registration is the complete batch for one publisher and Naming Service. Naming owns
+ * replacement, liveness, AP convergence, indexing, and cleanup. This service only composes the
+ * Naming identity, converts data structures, and builds public read models.</p>
+ *
+ * @author Nacos
+ */
+@Component
+public class AgentRuntimeRegistryService {
+    
+    private static final int MAX_RUNTIME_ENDPOINTS = 1000;
+    
+    private static final Comparator<RuntimeVersionBinding> BINDING_COMPARATOR =
+        new Comparator<RuntimeVersionBinding>() {
+            
+            @Override
+            public int compare(RuntimeVersionBinding left, RuntimeVersionBinding right) {
+                int result = AgentVersionComparator.compare(left.getRuntimeVersion(),
+                    right.getRuntimeVersion());
+                if (result != 0) {
+                    return result;
+                }
+                return left.getVersionRange().compareTo(right.getVersionRange());
+            }
+        };
+    
+    private final ServiceStorage serviceStorage;
+    
+    private final EphemeralClientOperationServiceImpl clientOperationService;
+    
+    private final AgentRuntimePublicationCapacityGate publicationCapacityGate;
+    
+    public AgentRuntimeRegistryService(ServiceStorage serviceStorage,
+        EphemeralClientOperationServiceImpl clientOperationService,
+        AgentRuntimePublicationCapacityGate publicationCapacityGate) {
+        this.serviceStorage = serviceStorage;
+        this.clientOperationService = clientOperationService;
+        this.publicationCapacityGate = publicationCapacityGate;
+    }
+    
+    /**
+     * Replace one publisher's complete Runtime Endpoint batch.
+     *
+     * @param publisherId Naming client identity
+     * @param batch complete batch for one Agent and protocol, with per-Endpoint Version bindings
+     * @throws NacosException when Naming rejects the batch
+     */
+    public void register(String publisherId, String namespaceId,
+        AgentEndpointRegistrationBatch batch)
+        throws NacosException {
+        RadModelValidator.validate(namespaceId, batch);
+        List<Instance> instances = new ArrayList<Instance>(batch.getEndpoints().size());
+        for (Endpoint endpoint : batch.getEndpoints()) {
+            RuntimeVersionBinding binding = EndpointCanonicalizer.canonicalizeRuntimeBinding(
+                endpoint, batch.getRuntimeVersion(), batch.getVersionRange());
+            instances.add(AgentRuntimeEndpointMapper.toInstance(endpoint,
+                binding.getRuntimeVersion(), binding.getVersionRange()));
+        }
+        NamingUtils.batchCheckInstanceIsLegal(instances);
+        Service service = composeService(namespaceId, batch.getAgentName(),
+            batch.getProtocol());
+        publicationCapacityGate.register(publisherId, service, instances.size(),
+            () -> clientOperationService.batchRegisterInstance(service, instances, publisherId));
+    }
+    
+    /**
+     * Remove one publisher's complete Runtime Endpoint publication.
+     *
+     * <p>Partial removal is a client-side batch operation: the client computes the retained
+     * instances and registers the replacement batch. This method is used only when no publication
+     * remains.</p>
+     *
+     * @param publisherId Naming client identity
+     * @param namespaceId namespace identifier
+     * @param agentName Agent name
+     * @param protocol Agent protocol
+     */
+    public void deregisterPublisher(String publisherId, String namespaceId, String agentName,
+        String protocol) {
+        validateReadIdentity(namespaceId, agentName, protocol, null);
+        clientOperationService.deregisterInstance(
+            composeService(namespaceId, agentName, protocol), new Instance(), publisherId);
+    }
+    
+    /**
+     * Return the management Runtime Endpoint snapshot for one Agent protocol.
+     *
+     * @param namespaceId namespace identifier
+     * @param agentName Agent name
+     * @param protocol Agent protocol
+     * @param version optional Agent Version filter
+     * @return Runtime Endpoint snapshot
+     * @throws NacosException when Naming state cannot be represented by the Agent contract
+     */
+    public RuntimeEndpointSnapshot getRuntimeEndpointSnapshot(String namespaceId,
+        String agentName,
+        String protocol, String version) throws NacosException {
+        validateReadIdentity(namespaceId, agentName, protocol, version);
+        RuntimeEndpointSnapshot result = new RuntimeEndpointSnapshot();
+        result.setNamespaceId(namespaceId);
+        result.setAgentName(agentName);
+        result.setVersion(version);
+        ServiceInfo serviceInfo = getServiceInfo(namespaceId, agentName, protocol);
+        EndpointSet endpointSet = new EndpointSet();
+        endpointSet.setSource(EndpointSource.RUNTIME);
+        endpointSet.setLastUpdatedTime(serviceInfo.getLastRefTime());
+        endpointSet.setEndpoints(
+            loadSnapshotItems(namespaceId, agentName, protocol, version, serviceInfo));
+        AgentCallInterface callInterface = new AgentCallInterface();
+        callInterface.setProtocol(protocol);
+        callInterface.setEndpointSets(Collections.singletonList(endpointSet));
+        result.setCallInterface(callInterface);
+        AgentModelValidator.validateRuntimeEndpointSnapshot(result);
+        return result;
+    }
+    
+    /**
+     * Return enabled Runtime Endpoints for RAD discovery.
+     *
+     * @param namespaceId namespace identifier
+     * @param agentName Agent name
+     * @param protocol Agent protocol
+     * @param version exact target Agent Version
+     * @return Runtime Endpoint set and deterministic source revision
+     * @throws NacosException when Naming state cannot be represented by the Agent contract
+     */
+    public EndpointSet getRuntimeEndpointSet(String namespaceId, String agentName,
+        String protocol, String version) throws NacosException {
+        if (version == null) {
+            throw new IllegalArgumentException("Runtime EndpointSet Version must not be null");
+        }
+        return getRuntimeEndpointSet(namespaceId, agentName, protocol,
+            Collections.singletonList(version));
+    }
+    
+    /**
+     * Return enabled Runtime Endpoints compatible with any supplied online Agent Version.
+     *
+     * @param namespaceId namespace identifier
+     * @param agentName Agent name
+     * @param protocol Agent protocol
+     * @param versions non-empty compatibility target Versions
+     * @return Runtime Endpoint set and deterministic source revision
+     * @throws NacosException when Naming state cannot be represented by the Agent contract
+     */
+    public EndpointSet getRuntimeEndpointSet(String namespaceId, String agentName,
+        String protocol, List<String> versions) throws NacosException {
+        return buildRuntimeEndpointSet(namespaceId, agentName, protocol, versions, false);
+    }
+    
+    /**
+     * Return Runtime Endpoints from current Naming publisher facts for server-side Watch
+     * projection.
+     *
+     * <p>Naming refreshes its reusable {@code ServiceInfo} cache from a delayed push task. A Watch
+     * projection triggered by the same service-change event must not read that older cache before
+     * the Naming task refreshes it, otherwise the change can be missed until reconciliation.</p>
+     *
+     * @param namespaceId namespace identifier
+     * @param agentName Agent name
+     * @param protocol Agent protocol
+     * @param versions non-empty compatibility target Versions
+     * @return Runtime Endpoint set built from current Naming publisher state
+     * @throws NacosException when Naming state cannot be represented by the Agent contract
+     */
+    public EndpointSet getCurrentRuntimeEndpointSet(String namespaceId, String agentName,
+        String protocol, List<String> versions) throws NacosException {
+        return buildRuntimeEndpointSet(namespaceId, agentName, protocol, versions, true);
+    }
+    
+    private EndpointSet buildRuntimeEndpointSet(String namespaceId, String agentName,
+        String protocol, List<String> versions, boolean currentFacts) throws NacosException {
+        validateDiscoveryVersions(namespaceId, agentName, protocol, versions);
+        List<Endpoint> endpoints =
+            loadRuntimeEndpoints(namespaceId, agentName, protocol, versions, currentFacts);
+        sortRuntimeEndpoints(namespaceId, agentName, protocol, endpoints);
+        EndpointSet result = new EndpointSet();
+        result.setSource(EndpointSource.RUNTIME);
+        result.setSourceRevision(
+            RuntimeEndpointRevision.compute(namespaceId, agentName, protocol, endpoints));
+        result.setEndpoints(endpoints);
+        RadModelValidator.validate(result);
+        return result;
+    }
+    
+    private List<Endpoint> loadSnapshotItems(String namespaceId,
+        String agentName, String protocol,
+        String version, ServiceInfo serviceInfo) throws NacosException {
+        Map<EndpointNaturalKey, Endpoint> result =
+            new TreeMap<EndpointNaturalKey, Endpoint>();
+        for (Instance instance : serviceInfo.getHosts()) {
+            Endpoint contribution =
+                mapInstance(instance);
+            List<RuntimeVersionBinding> matchingBindings =
+                matchingBindings(contribution.getBindings(), version);
+            if (matchingBindings.isEmpty()) {
+                continue;
+            }
+            contribution.setBindings(matchingBindings);
+            Endpoint endpoint = contribution;
+            EndpointNaturalKey key =
+                EndpointNaturalKey.of(namespaceId, agentName, protocol, endpoint);
+            Endpoint current = result.get(key);
+            if (current == null) {
+                result.put(key, contribution);
+            } else {
+                if (!samePayload(current, endpoint)) {
+                    throw conflict(key);
+                }
+                mergeSnapshotItem(current, contribution);
+            }
+        }
+        validateCapacity(result.size());
+        return new ArrayList<Endpoint>(result.values());
+    }
+    
+    private List<Endpoint> loadRuntimeEndpoints(String namespaceId,
+        String agentName, String protocol, List<String> versions, boolean currentFacts)
+        throws NacosException {
+        ServiceInfo serviceInfo = getServiceInfo(namespaceId, agentName, protocol, currentFacts);
+        Map<EndpointNaturalKey, Endpoint> payloads =
+            new TreeMap<EndpointNaturalKey, Endpoint>();
+        Map<EndpointNaturalKey, Endpoint> result =
+            new TreeMap<EndpointNaturalKey, Endpoint>();
+        for (Instance instance : serviceInfo.getHosts()) {
+            Endpoint contribution =
+                mapInstance(instance);
+            List<RuntimeVersionBinding> matchingBindings =
+                matchingBindings(contribution.getBindings(), versions);
+            if (matchingBindings.isEmpty()) {
+                continue;
+            }
+            Endpoint endpoint = contribution;
+            EndpointNaturalKey key =
+                EndpointNaturalKey.of(namespaceId, agentName, protocol, endpoint);
+            Endpoint previous = payloads.putIfAbsent(key, endpoint);
+            if (previous != null && !samePayload(previous, endpoint)) {
+                throw conflict(key);
+            }
+            if (!contribution.getEnabled()) {
+                continue;
+            }
+            Endpoint current = result.get(key);
+            if (current == null) {
+                current = copyEndpoint(endpoint);
+                current.setHealthy(contribution.getHealthy());
+                current.setBindings(matchingBindings);
+                result.put(key, current);
+            } else {
+                current.setHealthy(current.getHealthy() || contribution.getHealthy());
+                current.setBindings(mergeBindings(current.getBindings(), matchingBindings));
+            }
+        }
+        validateCapacity(payloads.size());
+        return new ArrayList<Endpoint>(result.values());
+    }
+    
+    private ServiceInfo getServiceInfo(String namespaceId, String agentName, String protocol) {
+        return getServiceInfo(namespaceId, agentName, protocol, false);
+    }
+    
+    private ServiceInfo getServiceInfo(String namespaceId, String agentName, String protocol,
+        boolean currentFacts) {
+        Service service = composeService(namespaceId, agentName, protocol);
+        ServiceInfo result = currentFacts ? serviceStorage.getPushData(service)
+            : serviceStorage.getData(service);
+        if (result == null) {
+            throw new NacosRuntimeException(NacosException.SERVER_ERROR,
+                "Naming ServiceStorage returned no Runtime Endpoint data");
+        }
+        return result;
+    }
+    
+    private Endpoint mapInstance(Instance instance) {
+        try {
+            return AgentRuntimeEndpointMapper.fromInstance(instance);
+        } catch (IllegalArgumentException e) {
+            throw new NacosRuntimeException(NacosException.SERVER_ERROR,
+                "Invalid Agent Runtime Endpoint in Naming ServiceStorage", e);
+        }
+    }
+    
+    private List<RuntimeVersionBinding> matchingBindings(
+        List<RuntimeVersionBinding> bindings, String version) {
+        List<RuntimeVersionBinding> result = new ArrayList<RuntimeVersionBinding>();
+        for (RuntimeVersionBinding binding : bindings) {
+            if (version == null
+                || RuntimeVersionRangeSupport.contains(binding.getVersionRange(), version)) {
+                result.add(binding);
+            }
+        }
+        return result;
+    }
+    
+    private List<RuntimeVersionBinding> matchingBindings(
+        List<RuntimeVersionBinding> bindings, List<String> versions) {
+        List<RuntimeVersionBinding> result = new ArrayList<RuntimeVersionBinding>();
+        for (RuntimeVersionBinding binding : bindings) {
+            for (String version : versions) {
+                if (RuntimeVersionRangeSupport.contains(binding.getVersionRange(), version)) {
+                    result.add(binding);
+                    break;
+                }
+            }
+        }
+        Collections.sort(result, BINDING_COMPARATOR);
+        return result;
+    }
+    
+    private List<RuntimeVersionBinding> mergeBindings(List<RuntimeVersionBinding> current,
+        List<RuntimeVersionBinding> contribution) {
+        Set<RuntimeVersionBinding> bindings =
+            new TreeSet<RuntimeVersionBinding>(BINDING_COMPARATOR);
+        bindings.addAll(current);
+        bindings.addAll(contribution);
+        return new ArrayList<RuntimeVersionBinding>(bindings);
+    }
+    
+    private void mergeSnapshotItem(Endpoint current,
+        Endpoint contribution) {
+        Set<RuntimeVersionBinding> bindings =
+            new TreeSet<RuntimeVersionBinding>(BINDING_COMPARATOR);
+        bindings.addAll(current.getBindings());
+        bindings.addAll(contribution.getBindings());
+        current.setBindings(new ArrayList<RuntimeVersionBinding>(bindings));
+        current.setEnabled(current.getEnabled() || contribution.getEnabled());
+        current.setHealthy(current.getHealthy() || contribution.getHealthy());
+    }
+    
+    private void validateCapacity(int size) throws NacosException {
+        if (size > MAX_RUNTIME_ENDPOINTS) {
+            throw new NacosException(NacosException.OVER_THRESHOLD,
+                "Runtime Endpoint result exceeds " + MAX_RUNTIME_ENDPOINTS
+                    + " natural keys");
+        }
+    }
+    
+    private Service composeService(String namespaceId, String agentName, String protocol) {
+        return Service.newService(namespaceId, Constants.Agent.AGENT_ENDPOINT_GROUP,
+            RadServiceNameComposer.compose(agentName, protocol));
+    }
+    
+    private void validateReadIdentity(String namespaceId, String agentName, String protocol,
+        String version) {
+        AgentValidationUtils.validateNamespaceId(namespaceId);
+        AgentValidationUtils.validateAgentName(agentName);
+        AgentValidationUtils.validateProtocol(protocol);
+        if (version != null) {
+            AgentValidationUtils.validateVersion(version);
+        }
+    }
+    
+    private void validateDiscoveryVersions(String namespaceId, String agentName, String protocol,
+        List<String> versions) {
+        validateReadIdentity(namespaceId, agentName, protocol, null);
+        if (versions == null || versions.isEmpty()) {
+            throw new IllegalArgumentException(
+                "Runtime EndpointSet Versions must not be empty");
+        }
+        for (String version : versions) {
+            AgentValidationUtils.validateVersion(version);
+        }
+    }
+    
+    private void sortRuntimeEndpoints(String namespaceId, String agentName, String protocol,
+        List<Endpoint> endpoints) {
+        Collections.sort(endpoints, new Comparator<Endpoint>() {
+            
+            @Override
+            public int compare(Endpoint left, Endpoint right) {
+                int result = Integer.compare(left.getPriority(), right.getPriority());
+                if (result != 0) {
+                    return result;
+                }
+                EndpointNaturalKey leftKey =
+                    EndpointNaturalKey.of(namespaceId, agentName, protocol, left);
+                EndpointNaturalKey rightKey =
+                    EndpointNaturalKey.of(namespaceId, agentName, protocol, right);
+                return leftKey.compareTo(rightKey);
+            }
+        });
+    }
+    
+    private NacosApiException conflict(EndpointNaturalKey key) {
+        return new NacosApiException(NacosException.CONFLICT, ErrorCode.RESOURCE_CONFLICT,
+            "Naming contains conflicting Runtime Endpoints for natural key: " + key);
+    }
+    
+    private boolean samePayload(Endpoint left, Endpoint right) {
+        Endpoint first = EndpointCanonicalizer.canonicalize(left);
+        Endpoint second = EndpointCanonicalizer.canonicalize(right);
+        return first.getUri().equals(second.getUri())
+            && first.getTransport().equals(second.getTransport())
+            && Objects.equals(first.getPriority(), second.getPriority())
+            && sameWeight(first.getWeight(), second.getWeight())
+            && Objects.equals(first.getMetadata(), second.getMetadata());
+    }
+    
+    private boolean sameWeight(Double left, Double right) {
+        double first = left == 0D ? 0D : left;
+        double second = right == 0D ? 0D : right;
+        return Double.doubleToLongBits(first) == Double.doubleToLongBits(second);
+    }
+    
+    private static Endpoint copyEndpoint(Endpoint source) {
+        Endpoint result = new Endpoint();
+        result.setUri(source.getUri());
+        result.setTransport(source.getTransport());
+        result.setPriority(source.getPriority());
+        result.setWeight(source.getWeight());
+        result.setHealthy(source.getHealthy());
+        if (source.getMetadata() != null) {
+            result.setMetadata(new LinkedHashMap<String, String>(source.getMetadata()));
+        }
+        return result;
+    }
+}

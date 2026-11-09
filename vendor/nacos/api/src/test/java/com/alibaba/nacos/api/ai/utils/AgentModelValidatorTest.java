@@ -1,0 +1,781 @@
+/*
+ * Copyright 1999-2026 Alibaba Group Holding Ltd.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package com.alibaba.nacos.api.ai.utils;
+
+import com.alibaba.nacos.api.ai.model.agent.EndpointSet;
+import com.alibaba.nacos.api.ai.constant.AiConstants;
+import com.alibaba.nacos.api.ai.model.agent.AgentSummary;
+import com.alibaba.nacos.api.ai.model.agent.AgentCallInterface;
+import com.alibaba.nacos.api.ai.model.agent.AgentOverview;
+import com.alibaba.nacos.api.ai.model.agent.AgentProvider;
+import com.alibaba.nacos.api.ai.model.agent.AgentVersionInfo;
+import com.alibaba.nacos.api.ai.model.agent.AgentVersionSummary;
+import com.alibaba.nacos.api.ai.model.agent.AgentVersionDetail;
+import com.alibaba.nacos.api.ai.model.agent.Endpoint;
+import com.alibaba.nacos.api.ai.model.agent.EndpointSource;
+import com.alibaba.nacos.api.ai.model.agent.RuntimeEndpointSnapshot;
+import com.alibaba.nacos.api.ai.model.agent.RuntimeVersionBinding;
+import com.alibaba.nacos.api.ai.spi.AgentScopeProvider;
+import com.alibaba.nacos.api.model.Page;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
+
+import java.lang.reflect.InvocationTargetException;
+import java.net.URL;
+import java.net.URLClassLoader;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collections;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+
+class AgentModelValidatorTest {
+    
+    private static final String CONTENT_DIGEST =
+        "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    
+    @Test
+    void testValidAgentVersionAndRuntimeSnapshot() {
+        assertDoesNotThrow(() -> AgentModelValidator.validateAgent(newValidAgent()));
+        assertDoesNotThrow(
+            () -> AgentModelValidator.validateVersionDetail(newValidVersionDetail()));
+        assertDoesNotThrow(
+            () -> AgentModelValidator.validateCallInterface(newValidCallInterface()));
+        assertDoesNotThrow(() -> AgentModelValidator.validateRuntimeEndpointSnapshot(
+            newValidRuntimeEndpointSnapshot()));
+    }
+    
+    @Test
+    void testValidVersionSummaryPage() {
+        Page<AgentVersionSummary> page = newValidVersionSummaryPage();
+        
+        assertDoesNotThrow(() -> AgentModelValidator.validateVersionSummaryPage(page));
+    }
+    
+    @Test
+    void testValidSummaryOverviewAndOptionalCollections() {
+        AgentSummary summary = newValidAgentSummary();
+        assertDoesNotThrow(() -> AgentModelValidator.validateAgentSummary(summary));
+        
+        AgentOverview overview = new AgentOverview();
+        overview.setAgent(newValidAgent());
+        overview.setVersionPage(newValidVersionSummaryPage());
+        assertDoesNotThrow(() -> AgentModelValidator.validateOverview(overview));
+        
+        AgentSummary agent = newValidAgent();
+        agent.setProvider(null);
+        agent.setTags(null);
+        agent.setExtensions(null);
+        agent.getVersionInfo().getLabels().put("candidate", "2.0.0");
+        assertDoesNotThrow(() -> AgentModelValidator.validateAgent(agent));
+        
+        AgentCallInterface callInterface = newValidCallInterface();
+        
+        callInterface.setEndpointSets(null);
+        assertDoesNotThrow(() -> AgentModelValidator.validateCallInterface(callInterface));
+        
+        RuntimeEndpointSnapshot unhealthySnapshot = newValidRuntimeEndpointSnapshot();
+        Endpoint unhealthyItem =
+            unhealthySnapshot.getCallInterface().getEndpointSets().get(0).getEndpoints().get(0);
+        unhealthyItem.setHealthy(false);
+        assertDoesNotThrow(() -> AgentModelValidator.validateRuntimeEndpointSnapshot(
+            unhealthySnapshot));
+        
+        RuntimeEndpointSnapshot disabledSnapshot = newValidRuntimeEndpointSnapshot();
+        Endpoint disabledItem =
+            disabledSnapshot.getCallInterface().getEndpointSets().get(0).getEndpoints().get(0);
+        disabledItem.setEnabled(false);
+        assertDoesNotThrow(() -> AgentModelValidator.validateRuntimeEndpointSnapshot(
+            disabledSnapshot));
+    }
+    
+    @Test
+    void testEmptyVersionCatalogRules() {
+        AgentVersionInfo emptyCatalog = new AgentVersionInfo();
+        emptyCatalog.setOnlineVersions(Collections.<AgentVersionSummary>emptyList());
+        assertDoesNotThrow(() -> AgentModelValidator.validateVersionCatalog(emptyCatalog));
+        
+        emptyCatalog.setLabels(new LinkedHashMap<String, String>(
+            Collections.singletonMap("latest", "1.0.0")));
+        assertThrows(IllegalArgumentException.class,
+            () -> AgentModelValidator.validateVersionCatalog(emptyCatalog));
+        
+        AgentSummary agent = newValidAgent();
+        agent.getVersionInfo().setLabels(Collections.<String, String>emptyMap());
+        agent.getVersionInfo().setOnlineVersions(
+            Collections.<AgentVersionSummary>emptyList());
+        assertDoesNotThrow(() -> AgentModelValidator.validateAgent(agent));
+        
+        agent.getVersionInfo().setLabels(
+            Collections.singletonMap("latest", "1.0.0"));
+        assertThrows(IllegalArgumentException.class,
+            () -> AgentModelValidator.validateAgent(agent));
+    }
+    
+    @Test
+    void testRejectsInvalidVersionCatalogEntries() {
+        AgentVersionInfo duplicateVersions = newValidAgent().getVersionInfo();
+        duplicateVersions.setOnlineVersions(Arrays.asList(
+            duplicateVersions.getOnlineVersions().get(0),
+            duplicateVersions.getOnlineVersions().get(0)));
+        assertThrows(IllegalArgumentException.class,
+            () -> AgentModelValidator.validateVersionCatalog(duplicateVersions));
+        
+        AgentVersionInfo missingLatest = newValidAgent().getVersionInfo();
+        missingLatest.setLabels(new LinkedHashMap<String, String>(
+            Collections.singletonMap("latest", "2.0.0")));
+        assertThrows(IllegalArgumentException.class,
+            () -> AgentModelValidator.validateVersionCatalog(missingLatest));
+        
+        AgentVersionInfo duplicateLabels = newValidAgent().getVersionInfo();
+        duplicateLabels.getOnlineVersions().get(0)
+            .setLabels(Arrays.asList("stable", "stable"));
+        assertThrows(IllegalArgumentException.class,
+            () -> AgentModelValidator.validateVersionCatalog(duplicateLabels));
+        
+        AgentVersionInfo emptyProtocols = newValidAgent().getVersionInfo();
+        emptyProtocols.getOnlineVersions().get(0)
+            .setProtocols(Collections.<String>emptyList());
+        assertThrows(IllegalArgumentException.class,
+            () -> AgentModelValidator.validateVersionCatalog(emptyProtocols));
+        
+        AgentVersionInfo duplicateProtocols = newValidAgent().getVersionInfo();
+        duplicateProtocols.getOnlineVersions().get(0)
+            .setProtocols(Arrays.asList("a2a", "a2a"));
+        assertThrows(IllegalArgumentException.class,
+            () -> AgentModelValidator.validateVersionCatalog(duplicateProtocols));
+    }
+    
+    @Test
+    void testRejectsInvalidVersionSummaryPages() {
+        Page<AgentVersionSummary> invalidMetadata = newValidVersionSummaryPage();
+        invalidMetadata.setPageNumber(0);
+        assertThrows(IllegalArgumentException.class,
+            () -> AgentModelValidator.validateVersionSummaryPage(invalidMetadata));
+        
+        Page<AgentVersionSummary> oversized = newValidVersionSummaryPage();
+        oversized.setTotalCount(101);
+        oversized.setPageItems(Collections.nCopies(101, newValidVersionSummary()));
+        assertThrows(IllegalArgumentException.class,
+            () -> AgentModelValidator.validateVersionSummaryPage(oversized));
+    }
+    
+    @Test
+    void testRejectsInvalidAgentCollectionsAndLifecycleCounts() {
+        AgentSummary oversizedTags = newValidAgent();
+        oversizedTags.setTags(Collections.nCopies(33, "tag"));
+        assertThrows(IllegalArgumentException.class,
+            () -> AgentModelValidator.validateAgent(oversizedTags));
+        
+        AgentSummary duplicateTags = newValidAgent();
+        duplicateTags.setTags(Arrays.asList("demo", "demo"));
+        assertThrows(IllegalArgumentException.class,
+            () -> AgentModelValidator.validateAgent(duplicateTags));
+        
+        AgentSummary oversizedExtensions = newValidAgent();
+        Map<String, Object> extensions = new LinkedHashMap<String, Object>();
+        for (int i = 0; i < 33; i++) {
+            extensions.put("example.com/key-" + i, i);
+        }
+        oversizedExtensions.setExtensions(extensions);
+        assertThrows(IllegalArgumentException.class,
+            () -> AgentModelValidator.validateAgent(oversizedExtensions));
+        
+        AgentSummary missingOnlineCount = newValidAgent();
+        missingOnlineCount.getVersionInfo().setOnlineVersions(null);
+        assertThrows(IllegalArgumentException.class,
+            () -> AgentModelValidator.validateAgent(missingOnlineCount));
+        
+        AgentSummary inconsistentOnlineCount = newValidAgent();
+        inconsistentOnlineCount.getVersionInfo().setOnlineVersions(Collections.emptyList());
+        assertThrows(IllegalArgumentException.class,
+            () -> AgentModelValidator.validateAgent(inconsistentOnlineCount));
+    }
+    
+    @Test
+    void testAcceptsUserDefinedTagPrefixes() {
+        AgentSummary agent = newValidAgent();
+        agent.setTags(Collections.singletonList("__nacos.agent.internal"));
+        
+        assertDoesNotThrow(() -> AgentModelValidator.validateAgent(agent));
+    }
+    
+    @Test
+    void testRejectsUnsupportedVisibilityScope() {
+        AgentSummary lowercaseScope = newValidAgent();
+        lowercaseScope.setScope("public");
+        assertThrows(IllegalArgumentException.class,
+            () -> AgentModelValidator.validateAgent(lowercaseScope));
+        
+        AgentSummary customScope = newValidAgent();
+        customScope.setScope("TEAM");
+        assertThrows(IllegalArgumentException.class,
+            () -> AgentModelValidator.validateAgent(customScope));
+    }
+    
+    @Test
+    void testRejectsInconsistentCatalogLabels() {
+        AgentSummary catalogLabelMismatch = newValidAgent();
+        catalogLabelMismatch.getVersionInfo().getLabels().put("stable", "2.0.0");
+        assertThrows(IllegalArgumentException.class,
+            () -> AgentModelValidator.validateAgent(catalogLabelMismatch));
+        
+        AgentSummary catalogMissingOnlineLabel = newValidAgent();
+        catalogMissingOnlineLabel.getVersionInfo().getLabels().put("canary", "1.0.0");
+        assertThrows(IllegalArgumentException.class,
+            () -> AgentModelValidator.validateAgent(catalogMissingOnlineLabel));
+    }
+    
+    @Test
+    void testRejectsInvalidCallInterfaceCollections() {
+        AgentVersionDetail noCallInterface = newValidVersionDetail();
+        noCallInterface.setCallInterfaces(Collections.<AgentCallInterface>emptyList());
+        assertThrows(IllegalArgumentException.class,
+            () -> AgentModelValidator.validateVersionDetail(noCallInterface));
+        
+        AgentCallInterface noEndpointSource = newValidCallInterface();
+        noEndpointSource.setEndpointSourceOrder(Collections.<EndpointSource>emptyList());
+        assertThrows(IllegalArgumentException.class,
+            () -> AgentModelValidator.validateCallInterface(noEndpointSource));
+        
+        AgentCallInterface duplicateEndpointSource = newValidCallInterface();
+        duplicateEndpointSource.setEndpointSourceOrder(
+            Arrays.asList(EndpointSource.RUNTIME, EndpointSource.RUNTIME));
+        assertThrows(IllegalArgumentException.class,
+            () -> AgentModelValidator.validateCallInterface(duplicateEndpointSource));
+        
+        AgentCallInterface tooManyEndpoints = newValidCallInterface();
+        
+        EndpointSet declaredSet1 = new EndpointSet();
+        declaredSet1.setSource(EndpointSource.DECLARED);
+        declaredSet1.setEndpoints(
+            Collections.nCopies(65, newDeclaredEndpoint("https://agent.example.com/a2a")));
+        tooManyEndpoints.setEndpointSets(Collections.singletonList(declaredSet1));
+        assertThrows(IllegalArgumentException.class,
+            () -> AgentModelValidator.validateCallInterface(tooManyEndpoints));
+    }
+    
+    @Test
+    void testDefinitionRequiresBothSourcesButNotBothAddressSets() {
+        AgentCallInterface definition = newValidCallInterface();
+        definition.setEndpointSets(null);
+        for (java.util.List<EndpointSource> order : Arrays.asList(
+            Arrays.asList(EndpointSource.RUNTIME, EndpointSource.DECLARED),
+            Arrays.asList(EndpointSource.DECLARED, EndpointSource.RUNTIME))) {
+            definition.setEndpointSourceOrder(order);
+            assertDoesNotThrow(() -> AgentModelValidator.validateCallInterface(definition));
+        }
+        for (java.util.List<EndpointSource> order : Arrays.asList(null,
+            Collections.<EndpointSource>emptyList(),
+            Collections.singletonList(EndpointSource.RUNTIME),
+            Collections.singletonList(EndpointSource.DECLARED),
+            Arrays.asList(EndpointSource.RUNTIME, EndpointSource.RUNTIME),
+            Arrays.asList(EndpointSource.RUNTIME, null))) {
+            definition.setEndpointSourceOrder(order);
+            assertThrows(IllegalArgumentException.class,
+                () -> AgentModelValidator.validateCallInterface(definition));
+        }
+    }
+    
+    @Test
+    void testRejectsRuntimeOrDuplicateSetsButAcceptsIgnoredHealthInDefinition() {
+        AgentCallInterface definition = newValidCallInterface();
+        EndpointSet declared = definition.getEndpointSets().get(0);
+        definition.setEndpointSets(Arrays.asList(declared, declared));
+        assertThrows(IllegalArgumentException.class,
+            () -> AgentModelValidator.validateCallInterface(definition));
+        definition.setEndpointSets(Collections.singletonList(declared));
+        declared.setSource(EndpointSource.RUNTIME);
+        assertThrows(IllegalArgumentException.class,
+            () -> AgentModelValidator.validateCallInterface(definition));
+        declared.setSource(EndpointSource.DECLARED);
+        declared.getEndpoints().get(0).setHealthy(false);
+        assertDoesNotThrow(() -> AgentModelValidator.validateCallInterface(definition));
+        declared.getEndpoints().get(0).setHealthy(true);
+        assertDoesNotThrow(() -> AgentModelValidator.validateCallInterface(definition));
+    }
+    
+    @Test
+    void testRuntimeSnapshotRequiresExactlyOneRuntimeSet() {
+        RuntimeEndpointSnapshot snapshot = newValidRuntimeEndpointSnapshot();
+        EndpointSet runtime = snapshot.getCallInterface().getEndpointSets().get(0);
+        snapshot.getCallInterface().setEndpointSets(Collections.emptyList());
+        assertThrows(IllegalArgumentException.class,
+            () -> AgentModelValidator.validateRuntimeEndpointSnapshot(snapshot));
+        snapshot.getCallInterface().setEndpointSets(Collections.singletonList(null));
+        assertThrows(IllegalArgumentException.class,
+            () -> AgentModelValidator.validateRuntimeEndpointSnapshot(snapshot));
+        snapshot.getCallInterface().setEndpointSets(Collections.singletonList(runtime));
+        runtime.setSource(EndpointSource.DECLARED);
+        assertThrows(IllegalArgumentException.class,
+            () -> AgentModelValidator.validateRuntimeEndpointSnapshot(snapshot));
+        runtime.setSource(EndpointSource.RUNTIME);
+        assertDoesNotThrow(() -> AgentModelValidator.validateRuntimeEndpointSnapshot(snapshot));
+    }
+    
+    @Test
+    void testRejectsInvalidRuntimeEndpointCollections() {
+        RuntimeEndpointSnapshot oversized = newValidRuntimeEndpointSnapshot();
+        oversized.getCallInterface().getEndpointSets().get(0).setEndpoints(Collections.nCopies(1001,
+            oversized.getCallInterface().getEndpointSets().get(0).getEndpoints().get(0)));
+        assertThrows(IllegalArgumentException.class,
+            () -> AgentModelValidator.validateRuntimeEndpointSnapshot(oversized));
+        
+        RuntimeEndpointSnapshot duplicateEndpoint = newValidRuntimeEndpointSnapshot();
+        duplicateEndpoint.getCallInterface().getEndpointSets().get(0).setEndpoints(Arrays.asList(
+            duplicateEndpoint.getCallInterface().getEndpointSets().get(0).getEndpoints().get(0),
+            duplicateEndpoint.getCallInterface().getEndpointSets().get(0).getEndpoints().get(0)));
+        assertThrows(IllegalArgumentException.class,
+            () -> AgentModelValidator.validateRuntimeEndpointSnapshot(duplicateEndpoint));
+        
+        RuntimeEndpointSnapshot noBindings = newValidRuntimeEndpointSnapshot();
+        noBindings.getCallInterface().getEndpointSets().get(0).getEndpoints().get(0).setBindings(
+            Collections.<RuntimeVersionBinding>emptyList());
+        assertThrows(IllegalArgumentException.class,
+            () -> AgentModelValidator.validateRuntimeEndpointSnapshot(noBindings));
+        
+        RuntimeEndpointSnapshot selectedVersionMismatch = newValidRuntimeEndpointSnapshot();
+        selectedVersionMismatch.setVersion("3.0.0");
+        assertThrows(IllegalArgumentException.class,
+            () -> AgentModelValidator.validateRuntimeEndpointSnapshot(selectedVersionMismatch));
+        
+        RuntimeEndpointSnapshot duplicateBinding = newValidRuntimeEndpointSnapshot();
+        RuntimeVersionBinding binding = duplicateBinding.getCallInterface().getEndpointSets().get(0)
+            .getEndpoints().get(0).getBindings().get(0);
+        duplicateBinding.getCallInterface().getEndpointSets().get(0).getEndpoints().get(0)
+            .setBindings(Arrays.asList(binding, binding));
+        assertThrows(IllegalArgumentException.class,
+            () -> AgentModelValidator.validateRuntimeEndpointSnapshot(duplicateBinding));
+        
+        RuntimeEndpointSnapshot endpointHealth = newValidRuntimeEndpointSnapshot();
+        endpointHealth.getCallInterface().getEndpointSets().get(0).getEndpoints().get(0)
+            .setHealthy(null);
+        assertThrows(IllegalArgumentException.class,
+            () -> AgentModelValidator.validateRuntimeEndpointSnapshot(endpointHealth));
+    }
+    
+    @Test
+    void testRejectsInvalidUrisAndLengths() {
+        AgentSummary emptyIconUrl = newValidAgent();
+        emptyIconUrl.setIconUrl("");
+        assertThrows(IllegalArgumentException.class,
+            () -> AgentModelValidator.validateAgent(emptyIconUrl));
+        
+        AgentSummary relativeIconUrl = newValidAgent();
+        relativeIconUrl.setIconUrl("icons/agent.png");
+        assertThrows(IllegalArgumentException.class,
+            () -> AgentModelValidator.validateAgent(relativeIconUrl));
+        
+        AgentSummary malformedProviderUrl = newValidAgent();
+        malformedProviderUrl.getProvider().setUrl("https://[");
+        assertThrows(IllegalArgumentException.class,
+            () -> AgentModelValidator.validateAgent(malformedProviderUrl));
+        
+        AgentSummary emptyOwner = newValidAgent();
+        emptyOwner.setOwner("");
+        assertThrows(IllegalArgumentException.class,
+            () -> AgentModelValidator.validateAgent(emptyOwner));
+        
+        AgentSummary oversizedDisplayName = newValidAgent();
+        oversizedDisplayName.setDisplayName(repeated('a', 129));
+        assertThrows(IllegalArgumentException.class,
+            () -> AgentModelValidator.validateAgent(oversizedDisplayName));
+    }
+    
+    @Test
+    void testRejectsLatestVersionCatalogMismatch() {
+        AgentSummary agent = newValidAgent();
+        agent.getVersionInfo().getLabels().put("latest", "1.1.0");
+        
+        assertThrows(IllegalArgumentException.class,
+            () -> AgentModelValidator.validateAgent(agent));
+    }
+    
+    @Test
+    void testRejectsDuplicateCallInterfaceProtocol() {
+        AgentVersionDetail detail = newValidVersionDetail();
+        detail.getCallInterfaces().add(newValidCallInterface());
+        
+        assertThrows(IllegalArgumentException.class,
+            () -> AgentModelValidator.validateVersionDetail(detail));
+    }
+    
+    @Test
+    void testRejectsDuplicateDeclaredEndpointNaturalKey() {
+        AgentVersionDetail detail = newValidVersionDetail();
+        Endpoint duplicate = newDeclaredEndpoint("https://AGENT.EXAMPLE.COM/another-path");
+        detail.getCallInterfaces().get(0).getEndpointSets().get(0).getEndpoints().add(duplicate);
+        
+        assertThrows(IllegalArgumentException.class,
+            () -> AgentModelValidator.validateVersionDetail(detail));
+    }
+    
+    @Test
+    void testRejectsVersionRangeThatDoesNotContainRuntimeVersion() {
+        RuntimeEndpointSnapshot snapshot = newValidRuntimeEndpointSnapshot();
+        RuntimeVersionBinding binding = snapshot.getCallInterface().getEndpointSets().get(0)
+            .getEndpoints().get(0).getBindings().get(0);
+        binding.setRuntimeVersion("2.0.0");
+        
+        assertThrows(IllegalArgumentException.class,
+            () -> AgentModelValidator.validateRuntimeEndpointSnapshot(snapshot));
+    }
+    
+    @Test
+    void testRejectsMissingRuntimeEndpointEnabled() {
+        RuntimeEndpointSnapshot snapshot = newValidRuntimeEndpointSnapshot();
+        Endpoint item = snapshot.getCallInterface().getEndpointSets().get(0).getEndpoints().get(0);
+        item.setEnabled(null);
+        
+        assertThrows(IllegalArgumentException.class,
+            () -> AgentModelValidator.validateRuntimeEndpointSnapshot(snapshot));
+    }
+    
+    @Test
+    void testRejectsMissingRequiredWrapperValues() {
+        AgentSummary agent = newValidAgent();
+        agent.setMetaVersion(null);
+        assertThrows(IllegalArgumentException.class,
+            () -> AgentModelValidator.validateAgent(agent));
+        
+        AgentVersionDetail detail = newValidVersionDetail();
+        detail.setCreateTime(null);
+        assertThrows(IllegalArgumentException.class,
+            () -> AgentModelValidator.validateVersionDetail(detail));
+        
+        RuntimeEndpointSnapshot snapshot = newValidRuntimeEndpointSnapshot();
+        snapshot.getCallInterface().getEndpointSets().get(0).getEndpoints().get(0).setHealthy(null);
+        assertThrows(IllegalArgumentException.class,
+            () -> AgentModelValidator.validateRuntimeEndpointSnapshot(snapshot));
+    }
+    
+    @Test
+    void testRejectsInvalidStatusValues() {
+        AgentSummary missingResourceStatus = newValidAgent();
+        missingResourceStatus.setStatus(null);
+        assertThrows(IllegalArgumentException.class,
+            () -> AgentModelValidator.validateAgent(missingResourceStatus));
+        
+        AgentSummary invalidResourceStatus = newValidAgent();
+        invalidResourceStatus.setStatus("ENABLE");
+        assertThrows(IllegalArgumentException.class,
+            () -> AgentModelValidator.validateAgent(invalidResourceStatus));
+        
+        AgentVersionDetail missingVersionStatus = newValidVersionDetail();
+        missingVersionStatus.setStatus(null);
+        assertThrows(IllegalArgumentException.class,
+            () -> AgentModelValidator.validateVersionDetail(missingVersionStatus));
+        
+        AgentVersionDetail invalidVersionStatus = newValidVersionDetail();
+        invalidVersionStatus.setStatus("published");
+        assertThrows(IllegalArgumentException.class,
+            () -> AgentModelValidator.validateVersionDetail(invalidVersionStatus));
+    }
+    
+    @Test
+    void testRejectsInconsistentLifecyclePointersAndLabels() {
+        AgentSummary sameWorkingVersion = newValidAgent();
+        sameWorkingVersion.getVersionInfo().setEditingVersion("2.0.0");
+        sameWorkingVersion.getVersionInfo().setReviewingVersion("2.0.0");
+        assertThrows(IllegalArgumentException.class,
+            () -> AgentModelValidator.validateAgent(sameWorkingVersion));
+        
+        AgentSummary workingVersionOnline = newValidAgent();
+        workingVersionOnline.getVersionInfo().setEditingVersion("1.0.0");
+        assertThrows(IllegalArgumentException.class,
+            () -> AgentModelValidator.validateAgent(workingVersionOnline));
+        
+        AgentSummary labelTargetsReviewing = newValidAgent();
+        labelTargetsReviewing.getVersionInfo().setReviewingVersion("2.0.0");
+        labelTargetsReviewing.getVersionInfo().getLabels().put("candidate", "2.0.0");
+        assertThrows(IllegalArgumentException.class,
+            () -> AgentModelValidator.validateAgent(labelTargetsReviewing));
+        
+    }
+    
+    @Test
+    void testRejectsMissingNativeDescriptorAfterBinding() {
+        AgentCallInterface callInterface = newValidCallInterface();
+        callInterface.setNativeDescriptor(null);
+        assertThrows(IllegalArgumentException.class,
+            () -> AgentModelValidator.validateCallInterface(callInterface));
+    }
+    
+    @Test
+    void testRejectsNonCanonicalRuntimeVersionRange() {
+        RuntimeEndpointSnapshot snapshot = newValidRuntimeEndpointSnapshot();
+        snapshot.getCallInterface().getEndpointSets().get(0).getEndpoints().get(0).getBindings()
+            .get(0)
+            .setVersionRange("[1.0.6,1.0.6]");
+        
+        assertThrows(IllegalArgumentException.class,
+            () -> AgentModelValidator.validateRuntimeEndpointSnapshot(snapshot));
+    }
+    
+    private AgentSummary newValidAgent() {
+        AgentProvider provider = new AgentProvider();
+        provider.setName("Nacos");
+        provider.setUrl("https://nacos.io");
+        
+        AgentVersionInfo versionInfo = new AgentVersionInfo();
+        Map<String, String> labels = new LinkedHashMap<String, String>();
+        labels.put("latest", "1.0.0");
+        labels.put("stable", "1.0.0");
+        versionInfo.setLabels(labels);
+        
+        AgentVersionSummary catalogEntry = new AgentVersionSummary();
+        catalogEntry.setVersion("1.0.0");
+        catalogEntry.setLabels(Collections.singletonList("stable"));
+        catalogEntry.setProtocols(Collections.singletonList("a2a"));
+        AgentVersionInfo catalog = new AgentVersionInfo();
+        catalog.setLabels(new LinkedHashMap<String, String>(
+            Collections.singletonMap("latest", "1.0.0")));
+        catalog.setOnlineVersions(Collections.singletonList(catalogEntry));
+        
+        AgentSummary agent = new AgentSummary();
+        agent.setNamespaceId("public");
+        agent.setAgentName("Demo Agent");
+        agent.setDisplayName("Demo Agent 展示名");
+        agent.setDescription("A complete Agent used by the validator contract test.");
+        agent.setIconUrl("https://example.com/icon.png");
+        agent.setProvider(provider);
+        agent.setTags(Arrays.asList("assistant", "demo"));
+        agent.setExtensions(Collections.<String, Object>singletonMap("example.com/color", "blue"));
+        agent.setStatus(AiConstants.Agent.RESOURCE_STATUS_ENABLE);
+        agent.setOwner("nacos");
+        agent.setScope("PUBLIC");
+        agent.setVersionInfo(versionInfo);
+        agent.getVersionInfo().setOnlineVersions(catalog.getOnlineVersions());
+        agent.setMetaVersion(1L);
+        agent.setCreateTime(1L);
+        agent.setUpdateTime(2L);
+        return agent;
+    }
+    
+    private AgentVersionDetail newValidVersionDetail() {
+        AgentVersionDetail detail = new AgentVersionDetail();
+        detail.setNamespaceId("public");
+        detail.setAgentName("Demo Agent");
+        detail.setVersion("1.0.0");
+        detail.setStatus(AiConstants.Agent.VERSION_STATUS_ONLINE);
+        detail.setCallInterfaces(new ArrayList<AgentCallInterface>(
+            Collections.singletonList(newValidCallInterface())));
+        detail.setAuthor("nacos");
+        detail.setChangeDescription("Initial online version");
+        detail.setContentDigest(CONTENT_DIGEST);
+        detail.setCreateTime(1L);
+        detail.setUpdateTime(2L);
+        return detail;
+    }
+    
+    private AgentVersionSummary newValidVersionSummary() {
+        AgentVersionSummary summary = new AgentVersionSummary();
+        summary.setVersion("1.0.0");
+        summary.setStatus(AiConstants.Agent.VERSION_STATUS_ONLINE);
+        summary.setAuthor("nacos");
+        summary.setChangeDescription("Initial online version");
+        summary.setContentDigest(CONTENT_DIGEST);
+        summary.setCreateTime(1L);
+        summary.setUpdateTime(2L);
+        return summary;
+    }
+    
+    private Page<AgentVersionSummary> newValidVersionSummaryPage() {
+        Page<AgentVersionSummary> page = new Page<AgentVersionSummary>();
+        page.setTotalCount(1);
+        page.setPageNumber(1);
+        page.setPagesAvailable(1);
+        page.setPageItems(Collections.singletonList(newValidVersionSummary()));
+        return page;
+    }
+    
+    private AgentSummary newValidAgentSummary() {
+        AgentSummary agent = newValidAgent();
+        AgentSummary summary = new AgentSummary();
+        summary.setNamespaceId(agent.getNamespaceId());
+        summary.setAgentName(agent.getAgentName());
+        summary.setDisplayName(agent.getDisplayName());
+        summary.setDescription(agent.getDescription());
+        summary.setIconUrl(agent.getIconUrl());
+        summary.setProvider(agent.getProvider());
+        summary.setTags(agent.getTags());
+        summary.setStatus(agent.getStatus());
+        summary.setOwner(agent.getOwner());
+        summary.setScope(agent.getScope());
+        summary.setVersionInfo(agent.getVersionInfo());
+        summary.getVersionInfo().setOnlineVersions(agent.getVersionInfo().getOnlineVersions());
+        summary.setMetaVersion(agent.getMetaVersion());
+        summary.setCreateTime(agent.getCreateTime());
+        summary.setUpdateTime(agent.getUpdateTime());
+        return summary;
+    }
+    
+    private AgentCallInterface newValidCallInterface() {
+        AgentCallInterface callInterface = new AgentCallInterface();
+        callInterface.setProtocol("a2a");
+        callInterface.setProtocolVersion("1.0.0");
+        callInterface.setDescriptorMediaType("application/json");
+        callInterface.setNativeDescriptor(Collections.singletonMap("name", "Demo Agent"));
+        callInterface.setEndpointSourceOrder(
+            Arrays.asList(EndpointSource.RUNTIME, EndpointSource.DECLARED));
+        List<Endpoint> endpoints = new ArrayList<Endpoint>();
+        endpoints.add(newDeclaredEndpoint("https://agent.example.com/a2a"));
+        
+        EndpointSet declaredSet2 = new EndpointSet();
+        declaredSet2.setSource(EndpointSource.DECLARED);
+        declaredSet2.setEndpoints(endpoints);
+        callInterface.setEndpointSets(Collections.singletonList(declaredSet2));
+        return callInterface;
+    }
+    
+    private RuntimeEndpointSnapshot newValidRuntimeEndpointSnapshot() {
+        RuntimeVersionBinding binding = new RuntimeVersionBinding();
+        binding.setRuntimeVersion("1.0.6");
+        binding.setVersionRange("[1.0.0,2.0.0)");
+        
+        Endpoint item = newDeclaredEndpoint("https://runtime.example.com/a2a");
+        item.setBindings(Collections.singletonList(binding));
+        item.setEnabled(true);
+        item.setHealthy(true);
+        
+        RuntimeEndpointSnapshot snapshot = new RuntimeEndpointSnapshot();
+        snapshot.setCallInterface(new AgentCallInterface());
+        EndpointSet runtimeSet = new EndpointSet();
+        runtimeSet.setSource(EndpointSource.RUNTIME);
+        runtimeSet.setLastUpdatedTime(2L);
+        snapshot.getCallInterface().setEndpointSets(Collections.singletonList(runtimeSet));
+        snapshot.setNamespaceId("public");
+        snapshot.setAgentName("Demo Agent");
+        snapshot.getCallInterface().setProtocol("a2a");
+        snapshot.setVersion("1.0.0");
+        snapshot.getCallInterface().getEndpointSets().get(0)
+            .setEndpoints(Collections.singletonList(item));
+        return snapshot;
+    }
+    
+    private Endpoint newDeclaredEndpoint(String uri) {
+        Endpoint endpoint = new Endpoint();
+        endpoint.setUri(uri);
+        endpoint.setTransport("JSON-RPC");
+        endpoint.setPriority(0);
+        endpoint.setWeight(1.0D);
+        endpoint.setMetadata(Collections.singletonMap("zone", "cn-hangzhou-a"));
+        return endpoint;
+    }
+    
+    private String repeated(char value, int count) {
+        char[] result = new char[count];
+        Arrays.fill(result, value);
+        return new String(result);
+    }
+    
+    @Test
+    void unregisteredScopesRemainInvalidWithoutProvider() {
+        AgentSummary agent = newValidAgent();
+        AgentSummary summary = newValidAgentSummary();
+        AgentOverview overview = new AgentOverview();
+        overview.setAgent(agent);
+        overview.setVersionPage(newValidVersionSummaryPage());
+        for (String scope : Arrays.asList("TEAM_EDIT", "public", "", null)) {
+            agent.setScope(scope);
+            summary.setScope(scope);
+            assertThrows(IllegalArgumentException.class,
+                () -> AgentModelValidator.validateAgent(agent));
+            assertThrows(IllegalArgumentException.class,
+                () -> AgentModelValidator.validateAgentSummary(summary));
+            assertThrows(IllegalArgumentException.class,
+                () -> AgentModelValidator.validateOverview(overview));
+        }
+    }
+    
+    @Test
+    void testScopeProviderDiscoveryAndRuntimeChanges(@TempDir Path directory) throws Exception {
+        Path descriptor =
+            directory.resolve("META-INF/services/" + AgentScopeProvider.class.getName());
+        Files.createDirectories(descriptor.getParent());
+        Files.write(descriptor,
+            MutableScopeProvider.class.getName().getBytes(StandardCharsets.UTF_8));
+        URL classes = AgentModelValidator.class.getProtectionDomain().getCodeSource().getLocation();
+        String validatorName = AgentModelValidator.class.getName();
+        // Isolate the cached SPI instances so the remaining tests still exercise the no-provider API.
+        try (URLClassLoader loader =
+            new URLClassLoader(new URL[] {directory.toUri().toURL(), classes},
+                AgentModelValidator.class.getClassLoader()) {
+                
+                @Override
+                protected Class<?> loadClass(String name, boolean resolve)
+                    throws ClassNotFoundException {
+                    if (!name.equals(validatorName) && !name.startsWith(validatorName + "$")
+                        && !name.equals(AgentVersion.class.getName())) {
+                        return super.loadClass(name, resolve);
+                    }
+                    Class<?> result = findLoadedClass(name);
+                    if (result == null) {
+                        result = findClass(name);
+                    }
+                    if (resolve) {
+                        resolveClass(result);
+                    }
+                    return result;
+                }
+            }) {
+            Class<?> validator = loader.loadClass(validatorName);
+            AgentSummary agent = newValidAgent();
+            agent.setScope("TEAM_EDIT");
+            AgentSummary summary = newValidAgentSummary();
+            summary.setScope("TEAM_EDIT");
+            AgentOverview overview = new AgentOverview();
+            overview.setAgent(agent);
+            overview.setVersionPage(newValidVersionSummaryPage());
+            MutableScopeProvider.scopes = Collections.singleton("TEAM_EDIT");
+            validator.getMethod("validateAgent", AgentSummary.class).invoke(null, agent);
+            validator.getMethod("validateAgentSummary", AgentSummary.class).invoke(null, summary);
+            validator.getMethod("validateOverview", AgentOverview.class).invoke(null, overview);
+            
+            MutableScopeProvider.scopes = Collections.emptySet();
+            InvocationTargetException failure = assertThrows(InvocationTargetException.class,
+                () -> validator.getMethod("validateAgent", AgentSummary.class).invoke(null, agent));
+            assertTrue(failure.getCause() instanceof IllegalArgumentException);
+            for (String scope : Arrays.asList("PUBLIC", "PRIVATE")) {
+                agent.setScope(scope);
+                validator.getMethod("validateAgent", AgentSummary.class).invoke(null, agent);
+            }
+        } finally {
+            MutableScopeProvider.scopes = Collections.emptySet();
+        }
+    }
+    
+    public static class MutableScopeProvider implements AgentScopeProvider {
+        
+        private static Set<String> scopes = Collections.emptySet();
+        
+        @Override
+        public Set<String> getScopeNames() {
+            return scopes;
+        }
+    }
+    
+}

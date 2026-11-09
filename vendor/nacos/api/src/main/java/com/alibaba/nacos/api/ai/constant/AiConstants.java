@@ -1,0 +1,194 @@
+/*
+ * Copyright 1999-2025 Alibaba Group Holding Ltd.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package com.alibaba.nacos.api.ai.constant;
+
+import com.alibaba.nacos.api.ai.model.mcp.registry.McpServerStatusEnum;
+
+/**
+ * Nacos Ai contants.
+ *
+ * @author xiweng.yy
+ */
+public class AiConstants {
+    
+    /**
+     * Capabilities of the responding Client HTTP binding.
+     */
+    public static class Capability {
+        
+        public static final String CLIENT_PATH = "/v3/client/ai/capabilities";
+        
+        public static final int SCHEMA_VERSION = 1;
+        
+        public static final String RAD_V1 = "radV1";
+        
+        public static final String MCP = "mcp";
+        
+        public static final String SKILL = "skill";
+        
+        public static final String PROMPT = "prompt";
+        
+        public static final String AGENT_SPEC = "agentSpec";
+    }
+    
+    public static class Mcp {
+        
+        public static final String MCP_DEFAULT_NAMESPACE = "public";
+        
+        public static final String MCP_PROTOCOL_STDIO = "stdio";
+        
+        public static final String MCP_PROTOCOL_SSE = "mcp-sse";
+        
+        public static final String MCP_PROTOCOL_STREAMABLE = "mcp-streamable";
+        
+        public static final String MCP_PROTOCOL_HTTP = "http";
+        
+        public static final String MCP_PROTOCOL_DUBBO = "dubbo";
+        
+        public static final String MCP_ENDPOINT_TYPE_REF = "REF";
+        
+        public static final String MCP_ENDPOINT_TYPE_DIRECT = "DIRECT";
+        
+        public static final String MCP_FRONT_ENDPOINT_TYPE_TO_BACK = "BACKEND";
+        
+        public static final String MCP_STATUS_ACTIVE = McpServerStatusEnum.ACTIVE.getName();
+        
+        public static final String MCP_STATUS_DEPRECATED = McpServerStatusEnum.DEPRECATED.getName();
+        
+        public static final String MCP_STATUS_DELETED = McpServerStatusEnum.DELETED.getName();
+        
+        public static final String OFFICIAL_TRANSPORT_SSE = "sse";
+        
+        public static final String OFFICIAL_TRANSPORT_STREAMABLE = "streamable-http";
+    }
+    
+    /**
+     * Agent constants.
+     */
+    public static class Agent {
+        
+        public static final String DISCOVERY_TRIGGER_HEADER = "X-Nacos-Agent-Discovery-Trigger";
+        
+        public static final String DISCOVERY_TRIGGER_WATCH_NOTIFY = "watch-notify";
+        
+        public static final String RESOURCE_STATUS_ENABLE = "enable";
+        
+        public static final String RESOURCE_STATUS_DISABLE = "disable";
+        
+        public static final String VERSION_STATUS_DRAFT = "draft";
+        
+        public static final String VERSION_STATUS_REVIEWING = "reviewing";
+        
+        public static final String VERSION_STATUS_REVIEWED = "reviewed";
+        
+        public static final String VERSION_STATUS_ONLINE = "online";
+        
+        public static final String VERSION_STATUS_OFFLINE = "offline";
+    }
+    
+    public static final String AI_TRANSPORT_MODE = "nacosAiTransportMode";
+    
+    /**
+     * Transport override for MCP; inherits {@link #AI_TRANSPORT_MODE}.
+     */
+    public static final String AI_MCP_TRANSPORT_MODE = "nacosAiMcpTransportMode";
+    
+    /**
+     * Transport override for native Agent/RAD (legacy A2A always uses gRPC); inherits {@link #AI_TRANSPORT_MODE}.
+     */
+    public static final String AI_AGENT_TRANSPORT_MODE = "nacosAiAgentTransportMode";
+    
+    /**
+     * Transport override for Skill (currently uses HTTP for every mode); inherits {@link #AI_TRANSPORT_MODE}.
+     */
+    public static final String AI_SKILL_TRANSPORT_MODE = "nacosAiSkillTransportMode";
+    
+    /**
+     * Transport override for AgentSpec (currently uses HTTP for every mode); inherits {@link #AI_TRANSPORT_MODE}.
+     */
+    public static final String AI_AGENT_SPEC_TRANSPORT_MODE = "nacosAiAgentSpecTransportMode";
+    
+    /**
+     * Transport override for Prompt queries and polling; inherits {@link #AI_TRANSPORT_MODE}.
+     */
+    public static final String AI_PROMPT_TRANSPORT_MODE = "nacosAiPromptTransportMode";
+    
+    public static final String AI_TRANSPORT_MODE_GRPC = "grpc";
+    
+    public static final String AI_TRANSPORT_MODE_HTTP = "http";
+    
+    public static final String AI_TRANSPORT_MODE_AUTO = "auto";
+    
+    public static final String AI_REQUEST_TIMEOUT = "nacosAiRequestTimeout";
+    
+    public static final String AI_MCP_SERVER_CACHE_UPDATE_INTERVAL =
+        "nacosAiMcpServerCacheUpdateInterval";
+    
+    public static final String AI_AGENT_CARD_CACHE_UPDATE_INTERVAL =
+        "nacosAiAgentCardCacheUpdateInterval";
+    
+    public static final String AI_PROMPT_CACHE_UPDATE_INTERVAL = "nacosAiPromptCacheUpdateInterval";
+    
+    public static final String AI_SKILL_CACHE_UPDATE_INTERVAL = "nacosAiSkillCacheUpdateInterval";
+    
+    public static final String AI_AGENTSPEC_CACHE_UPDATE_INTERVAL =
+        "nacosAiAgentSpecCacheUpdateInterval";
+    
+    /**
+     * Soft watermark for Agent Endpoint publication entries retained by one AI SDK instance.
+     */
+    public static final String AI_AGENT_ENDPOINT_MAX_PUBLICATIONS =
+        "nacosAiAgentEndpointMaxPublications";
+    
+    /**
+     * Maximum local Agent Discover polling subscriptions retained by one AI SDK instance.
+     */
+    public static final String AI_AGENT_DISCOVERY_MAX_SUBSCRIPTIONS =
+        "nacosAiAgentDiscoveryMaxSubscriptions";
+    
+    public static final int DEFAULT_AI_AGENT_ENDPOINT_MAX_PUBLICATIONS = 100;
+    
+    public static final int DEFAULT_AI_AGENT_DISCOVERY_MAX_SUBSCRIPTIONS = 300;
+    
+    public static final long DEFAULT_AI_CACHE_UPDATE_INTERVAL = 10000L;
+    
+    public static class A2a {
+        
+        public static final String ENDPOINT_PROTOCOL_VERSION =
+            "__nacos.agent.endpoint.protocolVersion__";
+        
+        public static final String ENDPOINT_TENANT = "__nacos.agent.endpoint.tenant__";
+        
+        public static final String A2A_DEFAULT_NAMESPACE = "public";
+        
+        /**
+         * Default endpoint type using `url` field of agent card directly when discovery
+         * a2a agent.
+         */
+        public static final String A2A_ENDPOINT_TYPE_URL = "URL";
+        
+        /**
+         * Default endpoint type using `backend` service of agent when discovery a2a
+         * agent.
+         */
+        public static final String A2A_ENDPOINT_TYPE_SERVICE = "SERVICE";
+        
+        public static final String A2A_ENDPOINT_DEFAULT_TRANSPORT = "JSONRPC";
+        
+        public static final String A2A_ENDPOINT_DEFAULT_PROTOCOL = "HTTP";
+    }
+}

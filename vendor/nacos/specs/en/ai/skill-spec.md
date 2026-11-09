@@ -1,0 +1,395 @@
+<!--
+  Copyright 1999-2026 Alibaba Group Holding Ltd.
+
+  Licensed under the Apache License, Version 2.0 (the "License");
+  you may not use this file except in compliance with the License.
+  You may obtain a copy of the License at
+
+       http://www.apache.org/licenses/LICENSE-2.0
+
+  Unless required by applicable law or agreed to in writing, software
+  distributed under the License is distributed on an "AS IS" BASIS,
+  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+  See the License for the specific language governing permissions and
+  limitations under the License.
+-->
+
+# Skill Spec
+
+This document defines the AI Registry contract for Skill resources.
+
+## 1. Identity
+
+Skill identity is:
+
+```text
+namespaceId -> skill -> name
+```
+
+The skill name is parsed from `SKILL.md` metadata during upload and is the
+stable resource name.
+
+## 2. Package Model
+
+A Skill is a packaged AI Agent capability. It contains:
+
+- `SKILL.md` as the main descriptor and instruction file;
+- optional resource files referenced by the descriptor;
+- metadata such as description, business tags, owner, scope, labels, version,
+  and download count.
+
+Skill upload accepts ZIP archives. Batch upload is best effort and returns a
+compatibility object containing the legacy `succeeded` and `failed` fields plus
+one entry in `results` for every Skill or candidate directory. Each result
+contains `name`, `success`, `errorCode`, `errorMessage`, and optional `owner`.
+Successful items use `success=true`, error code `SUCCESS`, and error message
+`success`. Failed items use `success=false` and include the concrete failure
+message. Batch upload
+reuses the precheck business codes `NOT_A_SKILL`, `INVALID_SKILL`, and
+`NO_PERMISSION` for equivalent failures. Unclassified failures use
+`UPLOAD_FAILED`. When upload fails because the caller lacks write permission on
+an existing Skill, the result must include the current owner when available.
+
+Upload precheck must accept the same ZIP archive as the upload API and parse
+single-Skill and multi-Skill archives on the server. It returns one result for
+each valid Skill, one `NOT_A_SKILL` result for each candidate directory without
+`SKILL.md`, and one `INVALID_SKILL` result for each invalid descriptor. The
+compact result contains `namespaceId`, `entryPath`, `skillName`, `reason`, `owner`,
+`maxPublishedVersion`, `parsedVersion`, `targetVersion`, `exists`,
+`editingVersion`, `reviewingVersion`, and one `precheckCode`. `entryPath` is the
+relative archive path of the Skill or invalid directory. `skillName` may be
+null for parse failures, and `reason` explains the parse failure. The code is
+the only field clients need to select the next action:
+
+`maxPublishedVersion` is the highest version that has been published, including
+both online and offline versions, or null when no version has been published.
+Draft, reviewing, and reviewed versions are excluded. `targetVersion` is the
+draft version that will exist after a successful upload.
+
+- `READY`: the upload can create a draft with `targetVersion`;
+- `VERSION_ADJUSTED`: the upload can create a draft, but the parsed version was
+  normalized, replaced, or advanced to `targetVersion`;
+- `DRAFT_EXISTS`: the upload can proceed only by overwriting the editing draft;
+- `REVIEWING_EXISTS`: a reviewing version blocks the upload;
+- `NO_PERMISSION`: the caller cannot modify the existing Skill;
+- `NOT_A_SKILL`: a candidate directory has no `SKILL.md`;
+- `INVALID_SKILL`: a candidate directory has a `SKILL.md`, but its Skill
+  descriptor is invalid.
+
+When several conditions apply, precheck must choose one code in this order:
+`NOT_A_SKILL`, `INVALID_SKILL`, `NO_PERMISSION`, `REVIEWING_EXISTS`,
+`DRAFT_EXISTS`, `VERSION_ADJUSTED`, `READY`. Clients must treat unknown codes
+as blocked.
+
+The precheck request contains the ZIP archive and optional namespace only; it
+does not accept `targetVersion`. Its result `targetVersion` is the version the
+server predicts from the archive and current server state. Precheck version
+source priority is `SKILL.md` frontmatter `version`, `SKILL.md` frontmatter
+`metadata.version`, sibling `_meta.json` `version`, then the server default.
+
+Single-Skill upload additionally accepts an optional request `targetVersion`.
+Upload version source priority is `SKILL.md` frontmatter `version`, `SKILL.md`
+frontmatter `metadata.version`, sibling `_meta.json` `version`, request
+`targetVersion`, then the server default. The server must evaluate explicit
+version candidates in that order and use the first valid, available version.
+An invalid or occupied higher-priority candidate must not immediately trigger
+server-side version generation when a lower-priority candidate is available.
+The current editing version is available for overwrite; a replacement for that
+editing version must be greater and unoccupied. The server generates a version
+only when no explicit candidate is available. Consequently, an upload that
+supplies `targetVersion` may use a different version from an earlier precheck.
+
+In batch mode, `NOT_A_SKILL` and `INVALID_SKILL` items count as neither Skills
+nor blocked Skills. The client should disable upload only when there is no valid
+Skill or every valid Skill is blocked. If at least one valid Skill can be
+uploaded, the client may call batch upload. Upload must repeat permission,
+version, and working version validation and must not treat precheck as write
+authorization.
+
+## 3. Agent Skills Standard Compatibility
+
+Nacos Skill packages should align with the
+[Agent Skills Specification](https://agentskills.io/specification). The
+upstream standard defines a skill as "a directory containing, at minimum, a
+`SKILL.md` file." Nacos uses this package convention as the external content
+contract and adds registry metadata, versioning, visibility, and storage
+semantics around it.
+
+Standard-compatible Skill packages follow these rules:
+
+- `SKILL.md` is required and contains YAML frontmatter followed by Markdown
+  instruction content.
+- `name` and `description` are required frontmatter fields. Nacos maps `name`
+  to the AI resource name and maps `description` to searchable metadata.
+- `description` supports YAML literal (`|`) and folded (`>`) block scalars,
+  including chomping indicators. Creation, upload, reads, lists, and details use
+  the complete parsed text; colons within that text must not create nested fields.
+- `license`, `compatibility`, `metadata`, and `allowed-tools` are optional
+  standard fields. Nacos must preserve them in `SKILL.md`; it may index selected
+  fields later, but the descriptor remains the source of truth for package
+  content.
+- Standard package roots may include optional `scripts/`, `references/`, and
+  `assets/` directories. Nacos stores and distributes these files as Skill
+  resources.
+- Ordinary resource files may be zero-byte or whitespace-only. Storage, reads,
+  and downloads must preserve the files and their content instead of treating
+  empty content as a missing file.
+- Upload parsing must ignore platform-generated ZIP metadata files, such as
+  macOS `.DS_Store`, `._*` AppleDouble files, and the `__MACOSX/` directory.
+  These files must not be stored or distributed as Skill resources. This
+  filtering must not affect normal resource files or hide nested Skill
+  directories.
+- Skill names should follow the upstream naming rule: lowercase alphanumeric
+  characters and hyphens, no leading or trailing hyphen, no consecutive
+  hyphens, and no more than 64 characters.
+
+The standard's progressive disclosure model is also part of the Nacos contract:
+metadata supports discovery, `SKILL.md` is loaded when a client activates the
+Skill, and referenced resources are loaded only when needed. Nacos indexes
+metadata for discovery, but must preserve package file boundaries so clients can
+apply progressive loading.
+
+Community registry compatibility, including skills CLI and well-known discovery
+endpoints, is defined by the
+[AI Registry Adaptor Spec](ai-registry-adaptor-spec.md). The adaptor is an
+optional compatibility surface and does not replace the canonical Skill resource
+lifecycle.
+
+External Skill import from marketplaces or registries is defined by the
+[AI Resource Import Plugin Spec](../plugin/ai-resource-import-plugin-spec.md).
+Import plugins must produce standard Skill package artifacts, and the Skill
+resource operator must apply those artifacts through the normal Skill upload or
+draft lifecycle. Import plugins must not bypass package validation, visibility,
+storage, or publish governance.
+
+Nacos registry paths must not execute package scripts during upload, query, or
+download. Script execution, static analysis, or security scanning belongs to
+publish pipeline plugins or to clients that explicitly activate a Skill. The AI
+pipeline plugin contract is defined by the
+[AI Pipeline Plugin Spec](../plugin/ai-pipeline-plugin-spec.md).
+
+## 4. Storage And Index
+
+Skill metadata and versions use `ai_resource` and `ai_resource_version`.
+Skill file content is stored through AI storage. The default storage is
+`nacos_config`, but that is an implementation backend.
+
+Each version must persist its storage provider in the `ai_resource_version`
+storage descriptor. Reads and deletes must route through that persisted
+provider. The effective AI Resource storage provider controls new writes only and
+must not redirect existing versions. A legacy descriptor without `provider`
+belongs to `nacos_config`.
+
+Updating or overwriting a draft replaces the complete Skill package content.
+After the replacement files are written, files referenced by the previous
+storage descriptor but omitted from the replacement package must be deleted
+through the version's persisted provider before the replacement descriptor is
+persisted. If cleanup fails, the update must fail and retain the previous
+descriptor so that cleanup can be retried.
+
+Skill also maintains a lightweight manifest for client-side discovery. The
+manifest is an index derived from Skill metadata and must not become the source
+of truth for lifecycle state.
+
+Skill participates in generic AI Resource Search and provides a
+resource-specific Search facade with `resourceType=skill` fixed. Both reuse the
+document/chunk/facet, currentness, visibility, and pagination semantics from
+the [AI Resource Search Spec](ai-resource-search-spec.md); neither the manifest
+nor an existing management list becomes a second Search index. The Skill
+handler projects the latest online Version's name, description, tags, and
+searchable manifest content. Package scripts, credentials, and undeclared
+binary content do not enter search chunks. Generic Search restricted to Skill
+has the same candidate eligibility as resource-specific Search.
+The Client facade is `GET /v3/client/ai/skills/search`; it accepts `query`,
+repeated `tagsAll`, `pageNo`, and `pageSize`, and returns the existing
+`Page<SkillBasicInfo>` shape.
+
+Storage extension rules are defined by the
+[AI Storage Plugin Spec](../plugin/ai-storage-plugin-spec.md).
+
+### 4.1 Management list frontmatter
+
+Admin and Console Skill lists and metadata detail responses expose nullable
+`frontMatter: Map<String, String>` and `frontMatterTruncated: Boolean` fields
+(null may be omitted by the response serializer). Values use the existing Skill
+frontmatter parser's string representation, including flattened `metadata.*`
+keys. This change does not add frontmatter search or alter the package parser.
+
+The display version is the server-managed `latest`, falling back to
+`editingVersion`, then `reviewingVersion`. An editing draft must not replace an
+online version's frontmatter. No display version means `frontMatter = null`.
+
+The Skill resource description must come from the displayed version's
+`storage.frontMatter.description`, never from its commit message. Creating,
+uploading, overwriting or saving a draft must not overwrite another online
+display version's description. Update the description and custom frontmatter
+snapshot in the same metadata CAS. Lifecycle refreshes must check and repair the
+description even if the display version or custom fields are unchanged, and
+reselect the display version after conflicts.
+
+When the last online version goes offline, select an editing or reviewing
+version using the priority above if one remains. Otherwise retain the correct
+description of the version just taken offline. Do not clear it, select the
+maximum historical published version, or blindly retain stale resource metadata
+such as a discarded draft's description or `|`. This description is for management
+display only: remove `latest`, keep `onlineCnt=0`, and continue returning null
+frontmatter when no display version exists. Persist the retained description with
+the offline lifecycle pointers in the same CAS so a delayed snapshot refresh
+cannot overwrite a description retained by a concurrent operation.
+
+Historical descriptors missing parsed frontmatter or description do not trigger
+package reads or automatic migration. Preserve the existing description and log
+a WARN with namespace, Skill and version until a content update supplies the
+metadata. Log refresh failures and exhausted CAS retries without description
+contents; do not turn an already completed lifecycle operation into a failure.
+
+New or updated content stores the complete parsed `frontMatter` alongside the
+version's storage descriptor. Upload, upload overwrite, draft
+creation/update/fork and new bootstrap imports populate it from the SKILL.md
+bytes being saved. This version-level value is not truncated.
+
+`ai_resource.ext` holds a bounded display snapshot as `frontMatter`,
+`frontMatterVersion`, and `frontMatterTruncated`; unrelated extension keys must
+be preserved. The snapshot contains custom fields only. `name`, `description`,
+and `version` are reserved and excluded from it. When the marker matches the
+resolved display version, responses generate those fields from
+`SkillSummary.name`, `SkillSummary.description`, and the resolved version, then
+merge cached custom fields. Cached data cannot override the generated values.
+
+The custom-field snapshot has at most 64 entries, 128 UTF-8 bytes per key,
+1,024 characters per value, and 16 KiB of serialized map data. Longer values
+retain the first 1,021 characters and append `...`; oversized keys are omitted.
+`alias`, `license`, `compatibility`, `allowed-tools`, and flattened `metadata.*`
+fields are selected before other custom fields. Remaining lower-priority fields
+may be omitted when an entry or byte limit is reached. `frontMatterTruncated`
+is true when any custom key or value is omitted or shortened, false for a
+complete projection, and null or omitted when frontmatter is unavailable.
+
+Publish, force-publish, redraft, draft deletion and version online/offline
+operations refresh the snapshot from version metadata, without reading package
+files. Unchanged display snapshots are reused during edits of another version.
+The existing list `pageSize` behavior is unchanged.
+
+Snapshot writes use metadata CAS. Conflicts must restart version selection and
+metadata loading from the current resource row. Snapshot refresh is best-effort:
+retry exhaustion or refresh failure is logged and must not fail an already
+completed lifecycle operation. Lists and metadata detail queries compare
+`frontMatterVersion` with the display version from the same row and return null
+on a mismatch, without querying version rows or storage for frontmatter.
+
+Historical versions without this metadata remain readable and may return null.
+There is no migration, bootstrap repair or list-time backfill. Newly updating
+historical content populates metadata for the updated version only; merely
+publishing or toggling an untouched historical version does not parse its files.
+Malformed historical `ai_resource.ext` values are treated as unavailable
+metadata: list and metadata detail requests remain successful and return null
+frontmatter rather than propagating JSON deserialization failures.
+
+## 5. Lifecycle
+
+Skill follows the shared [AI Resource Lifecycle Spec](ai-resource-lifecycle-spec.md):
+
+- upload creates or overwrites a draft according to request options;
+- upload may accept an optional commit message and must store it as the draft
+  version description when a draft version is created or overwritten;
+- bootstrap built-in Skill may directly create online metadata and version
+  rows;
+- submitting a draft or reviewed version may run publish pipeline and then
+  publish or leave the version reviewed; submitting a reviewing version is
+  idempotent;
+- labels, online/offline, scope, business tags, and delete operations update
+  metadata through CAS where required.
+
+Imported Skills follow the upload and draft rules unless the operation is an
+explicit bootstrap flow owned by the server. Dependency handling, such as a
+Skill referencing MCP tools, is previewed through the unified import flow and
+must not recursively import dependencies by default.
+
+## 6. Runtime Behavior
+
+Runtime clients may download Skill ZIP content by latest, explicit version, or
+label. Downloads should increment counters and emit trace or download events
+where supported.
+
+Runtime clients should not receive broad management operations such as upload,
+publish, delete, or unrestricted listing.
+
+Runtime clients may query Skill by `name`, optional `version`, optional
+`label`, and optional md5. If md5 equals the content md5 of the currently
+resolved version, the server may return a not-modified error and must not
+include a ZIP body. When the client does not send md5, the server must return
+the current content as a ZIP together with the corresponding md5. This
+contract supports polling-based listening; subscriptions should report Skill
+content changes through md5 transitions without exposing broad management
+listing behavior to runtime clients.
+
+Skill content md5 is a version-scoped field. It must be computed once when an
+upload or publish writes version content and must be persisted with
+`ai_resource_version`; runtime query paths must not recompute it. The md5
+input is the full set of package bytes of the published version (`SKILL.md`
+and all referenced resources), and its scope must match the ZIP bytes returned
+on download so that an md5 hit on the client never corresponds to different
+server-side bytes.
+
+For versions that exist before the listening contract is enabled and therefore
+lack md5, the server must backfill md5 with the same input scope on the first
+listening-style query and return that md5 in the same response. While md5 is
+missing or backfill fails, the server must return a 200 response with the ZIP
+and must not return not-modified.
+
+### 6.1 Client Polling Listener Contract
+
+Nacos does not push Skill changes; the client SDK realizes listener semantics
+by periodically issuing a conditional `GET /v3/client/ai/skills`. The listener
+contract is composed of the following requirements that both the server and
+any SDK implementing this contract must respect:
+
+- **Response headers**: A 200 response must carry `Content-Type:
+  application/zip`, `Content-Disposition: attachment;filename=<name>.zip`,
+  `ETag: "<md5>"`, `X-Nacos-Skill-Md5: <md5>`, and
+  `X-Nacos-Skill-Resolved-Version: <version>`. The resolved-version header
+  reflects the actual version after `label`/`latest` routing parameters are
+  resolved.
+- **304 response**: When the client-supplied md5 equals the md5 of the
+  resolved version, the server returns `304 Not Modified` with an empty body.
+  It must include `ETag` and `X-Nacos-Skill-Md5`. Per RFC 7232 it must not
+  include `Content-Type` and must not include
+  `X-Nacos-Skill-Resolved-Version`, since 304 should not restate entity
+  metadata.
+- **404 response**: When the skill name is valid but the resource is missing,
+  the server returns `404` with business error code `20004`. Clients must
+  translate this into local cache eviction and emit a content-missing event,
+  and must not treat it as a transient error to retry.
+- **Polling schedule**: The SDK must adopt a single-threaded `schedule + tail
+  self-reschedule` pattern, so that the next query starts from the previous
+  task's completion time rather than its start time. This avoids request
+  pile-up under slow server responses. The SDK must not use
+  `scheduleAtFixedRate`.
+- **Default interval**: The default polling interval is `10000` milliseconds
+  (`AiConstants.DEFAULT_AI_CACHE_UPDATE_INTERVAL`). The first query happens
+  one interval after the subscription. Because the subscription itself
+  synchronously primes the cache, the SDK must not issue an immediate
+  additional query.
+- **Tunable interval**: Clients override the default by passing
+  `nacosAiSkillCacheUpdateInterval`
+  (`AiConstants.AI_SKILL_CACHE_UPDATE_INTERVAL`) through `Properties`, in
+  milliseconds. This setting only applies to Skill and is independent from
+  the polling intervals of Prompt, MCP Server, and AgentCard.
+- **Cancellation**: `unsubscribeSkill` must cancel the corresponding task,
+  remove the md5 cache entry, and stop emitting polling requests to the
+  server.
+
+## 7. Pending Alignment Issues
+
+- Enforce the full upstream name validation rule during upload.
+- Decide which optional standard frontmatter fields should be indexed into
+  Nacos metadata while keeping `SKILL.md` as the package source of truth.
+- Define compatibility behavior if future Agent Skills versions change package
+  structure, frontmatter fields, or progressive-disclosure recommendations.
+
+## 8. Evolution Note
+
+Skill package conventions may change with AI Agent frameworks. New Skill
+package formats should define parsing, validation, storage, and migration
+rules. Existing Skill versions must remain retrievable unless explicitly
+deprecated.

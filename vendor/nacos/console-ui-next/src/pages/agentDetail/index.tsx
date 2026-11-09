@@ -1,0 +1,940 @@
+import { Fragment, useCallback, useEffect, useMemo, useState } from 'react';
+import { useNavigate, useSearchParams } from 'react-router-dom';
+import { useTranslation } from 'react-i18next';
+import type { TFunction } from 'i18next';
+import {
+  ArrowLeft,
+  Bot,
+  CheckCircle2,
+  Clock,
+  ExternalLink,
+  FilePenLine,
+  Globe,
+  History,
+  Layers3,
+  Pencil,
+  Plus,
+  Power,
+  PowerOff,
+  RefreshCw,
+  Send,
+  Server,
+  ShieldAlert,
+  Trash2,
+} from 'lucide-react';
+import { toast } from 'sonner';
+import { agentApi } from '@/api/agent';
+import { AiResourceStatusControls } from '@/components/ai/AiResourceStatusControls';
+import { AiVersionSelectOption } from '@/components/ai/AiVersionSelectOption';
+import { DetailTagChip } from '@/components/ai/DetailTagChip';
+import {
+  VersionLifecycleActionBar,
+  VersionLifecycleActionDivider,
+} from '@/components/ai/VersionLifecycleActionBar';
+import { VisibilityAuthorizationDialog } from '@/components/ai/VisibilityAuthorizationDialog';
+import { Badge } from '@/components/ui/badge';
+import { Button } from '@/components/ui/button';
+import { Card, CardContent } from '@/components/ui/card';
+import { Textarea } from '@/components/ui/textarea';
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select';
+import { Skeleton } from '@/components/ui/skeleton';
+import {
+  Sheet,
+  SheetContent,
+  SheetDescription,
+  SheetHeader,
+  SheetTitle,
+} from '@/components/ui/sheet';
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
+import { useAgentStore } from '@/stores/agent-store';
+import { useAuthStore } from '@/stores/auth-store';
+import { useNamespaceStore } from '@/stores/namespace-store';
+import type {
+  AgentVersionActionData,
+  AgentVersionStatus,
+  AgentVersionSummary,
+} from '@/types/agent';
+import { parsePipelineInfo } from '@/types/pipeline';
+import {
+  type AgentVersionAction,
+  buildAgentStatusUpdateData,
+  endpointSourceOrderLabelKey,
+  declaredEndpointsOf,
+  formatProtocolLabel,
+  getProtocols,
+  getVersionActions,
+  namingDetailPath,
+  runtimeCacheKey,
+  runtimeEndpointStatus,
+} from '../newAgent/agent-console-model';
+
+type LifecycleAction = 'submit' | 'publish' | 'forcePublish' | 'redraft' | 'online' | 'offline';
+
+const VERSION_STATUSES: AgentVersionStatus[] = [
+  'draft',
+  'reviewing',
+  'reviewed',
+  'online',
+  'offline',
+];
+
+function formatTime(value?: number | null): string {
+  return value ? new Date(value).toLocaleString() : '-';
+}
+
+const ACTION_LABEL_KEYS: Record<AgentVersionAction, string> = {
+  submit: 'agent.actionSubmit',
+  publish: 'agent.actionPublish',
+  forcePublish: 'agent.actionForcePublish',
+  redraft: 'agent.actionRedraft',
+  online: 'agent.actionOnline',
+  offline: 'agent.actionOffline',
+  editDraft: 'agent.actionEditDraft',
+  deleteDraft: 'agent.actionDeleteDraft',
+};
+
+const STATUS_LABEL_KEYS: Record<AgentVersionStatus, string> = {
+  draft: 'agent.statusDraft',
+  reviewing: 'agent.statusReviewing',
+  reviewed: 'agent.statusReviewed',
+  online: 'agent.statusOnline',
+  offline: 'agent.statusOffline',
+};
+
+function actionLabel(t: TFunction, action: AgentVersionAction): string {
+  return t(ACTION_LABEL_KEYS[action]);
+}
+
+function versionStatusLabel(t: TFunction, status: AgentVersionStatus): string {
+  return t(STATUS_LABEL_KEYS[status]);
+}
+
+function ActionIcon({ action }: { action: AgentVersionAction }) {
+  switch (action) {
+    case 'editDraft':
+    case 'redraft':
+      return <Pencil className="h-3.5 w-3.5" />;
+    case 'submit':
+      return <Send className="h-3.5 w-3.5" />;
+    case 'publish':
+      return <CheckCircle2 className="h-3.5 w-3.5" />;
+    case 'forcePublish':
+      return <ShieldAlert className="h-3.5 w-3.5" />;
+    case 'online':
+      return <Power className="h-3.5 w-3.5" />;
+    case 'offline':
+      return <PowerOff className="h-3.5 w-3.5" />;
+    case 'deleteDraft':
+      return <Trash2 className="h-3.5 w-3.5" />;
+  }
+}
+
+export default function AgentDetailPage() {
+  const { t } = useTranslation();
+  const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
+  const { currentNamespace } = useNamespaceStore();
+  const { globalAdmin, username } = useAuthStore();
+  const namespaceId = searchParams.get('namespaceId') || currentNamespace || 'public';
+  const agentName = searchParams.get('name') || '';
+  const requestedVersion = searchParams.get('version') || '';
+  const {
+    currentOverview,
+    currentVersion,
+    versionPage,
+    runtimeCache,
+    detailLoading,
+    runtimeLoading,
+    error,
+    fetchOverview,
+    fetchVersionPage,
+    fetchVersion,
+    fetchRuntime,
+    clearDetail,
+  } = useAgentStore();
+  const [selectedVersion, setSelectedVersion] = useState(requestedVersion);
+  const [selectedProtocol, setSelectedProtocol] = useState('');
+  const [versionSheetOpen, setVersionSheetOpen] = useState(false);
+  const [versionStatus, setVersionStatus] = useState<AgentVersionStatus | 'ALL'>('ALL');
+  const [versionPageNo, setVersionPageNo] = useState(1);
+  const [actionLoading, setActionLoading] = useState(false);
+  const [enableToggling, setEnableToggling] = useState(false);
+  const [scopeToggling, setScopeToggling] = useState(false);
+  const [visibilityDialogOpen, setVisibilityDialogOpen] = useState(false);
+  const [labelsText, setLabelsText] = useState('{}');
+
+  const loadOverview = useCallback(async () => {
+    if (!agentName) {
+      return null;
+    }
+    const overview = await fetchOverview(namespaceId, agentName);
+    if (overview) {
+      const labels = { ...(overview.agent.versionInfo?.labels || {}) };
+      delete labels.latest;
+      setLabelsText(JSON.stringify(labels, null, 2));
+      const fallback = overview.agent.versionInfo?.labels?.latest
+        || overview.agent.versionInfo?.editingVersion
+        || overview.agent.versionInfo?.reviewingVersion
+        || overview.versionPage.pageItems[0]?.version
+        || '';
+      setSelectedVersion((current) => current || fallback);
+    }
+    return overview;
+  }, [agentName, fetchOverview, namespaceId]);
+
+  useEffect(() => {
+    loadOverview();
+    return clearDetail;
+  }, [clearDetail, loadOverview]);
+
+  useEffect(() => {
+    if (agentName) {
+      fetchVersionPage(
+        namespaceId,
+        agentName,
+        versionStatus === 'ALL' ? undefined : versionStatus,
+        versionPageNo,
+        20,
+      );
+    }
+  }, [agentName, namespaceId, versionStatus, versionPageNo, fetchVersionPage]);
+
+  useEffect(() => {
+    if (agentName && selectedVersion) {
+      fetchVersion(namespaceId, agentName, selectedVersion);
+    }
+  }, [agentName, namespaceId, selectedVersion, fetchVersion]);
+
+  const protocols = useMemo(
+    () => getProtocols(currentVersion?.callInterfaces || []),
+    [currentVersion],
+  );
+
+  useEffect(() => {
+    setSelectedProtocol((current) => protocols.includes(current) ? current : protocols[0] || '');
+  }, [protocols]);
+
+  useEffect(() => {
+    if (currentVersion && selectedProtocol) {
+      fetchRuntime(
+        namespaceId,
+        agentName,
+        currentVersion.version,
+        selectedProtocol,
+      );
+    }
+  }, [currentVersion, selectedProtocol, namespaceId, agentName, fetchRuntime]);
+
+  const selectedInterface = currentVersion?.callInterfaces.find(
+    (item) => item.protocol === selectedProtocol,
+  );
+  const sourceOrderLabelKey = endpointSourceOrderLabelKey(selectedInterface?.endpointSourceOrder);
+  const runtimeView = currentVersion && selectedProtocol
+    ? runtimeCache[runtimeCacheKey(currentVersion.version, selectedProtocol)]
+    : undefined;
+
+  const editPath = (mode: string, version?: string, basedOnVersion?: string) => {
+    const params = new URLSearchParams({ namespaceId, name: agentName, mode });
+    if (version) {
+      params.set('version', version);
+    }
+    if (basedOnVersion) {
+      params.set('basedOnVersion', basedOnVersion);
+    }
+    navigate(`/newAgent?${params.toString()}`);
+  };
+
+  const runLifecycleAction = async (action: LifecycleAction) => {
+    if (!currentVersion) {
+      return;
+    }
+    const identity: AgentVersionActionData = {
+      namespaceId,
+      agentName,
+      version: currentVersion.version,
+    };
+    setActionLoading(true);
+    try {
+      switch (action) {
+        case 'submit':
+          await agentApi.submit(identity);
+          break;
+        case 'publish':
+          await agentApi.publish(identity);
+          break;
+        case 'forcePublish':
+          await agentApi.forcePublish(identity);
+          break;
+        case 'redraft':
+          await agentApi.redraft(identity);
+          break;
+        case 'online':
+          await agentApi.online(identity);
+          break;
+        case 'offline':
+          await agentApi.offline(identity);
+          break;
+      }
+      toast.success(t('agent.actionSuccess'));
+      await loadOverview();
+      await fetchVersionPage(
+        namespaceId,
+        agentName,
+        versionStatus === 'ALL' ? undefined : versionStatus,
+        versionPageNo,
+        20,
+      );
+      await fetchVersion(namespaceId, agentName, currentVersion.version);
+    } finally {
+      setActionLoading(false);
+    }
+  };
+
+  const deleteDraft = async () => {
+    if (!currentVersion) {
+      return;
+    }
+    setActionLoading(true);
+    try {
+      await agentApi.deleteDraft({
+        namespaceId,
+        agentName,
+        version: currentVersion.version,
+      });
+      toast.success(t('agent.deleteDraftSuccess'));
+      setSelectedVersion('');
+      await loadOverview();
+    } finally {
+      setActionLoading(false);
+    }
+  };
+
+  const updateLabels = async () => {
+    try {
+      const parsed = JSON.parse(labelsText);
+      if (parsed === null || Array.isArray(parsed) || typeof parsed !== 'object') {
+        throw new Error(t('agent.labelsObjectRequired'));
+      }
+      if ('latest' in parsed) {
+        throw new Error(t('agent.latestLabelManaged'));
+      }
+      await agentApi.updateLabels({
+        namespaceId,
+        agentName,
+        labels: JSON.stringify(parsed),
+      });
+      toast.success(t('agent.updateSuccess'));
+      await loadOverview();
+    } catch (error) {
+      if (error instanceof SyntaxError || (error instanceof Error && !('response' in error))) {
+        toast.error(error instanceof SyntaxError ? t('agent.jsonFormatError') : error.message);
+      }
+    }
+  };
+
+  const toggleAgentScope = async (isPublic: boolean) => {
+    const agent = currentOverview?.agent;
+    const scope = isPublic ? 'PUBLIC' : 'PRIVATE';
+    if (!agent || agent.scope === scope) return;
+    setScopeToggling(true);
+    try {
+      await agentApi.updateScope({ namespaceId, agentName, scope });
+      toast.success(t('agent.updateSuccess'));
+      await loadOverview();
+    } finally {
+      setScopeToggling(false);
+    }
+  };
+
+  const toggleAgentEnable = async (enabled: boolean) => {
+    const agent = currentOverview?.agent;
+    if (!agent || agent.status === (enabled ? 'enable' : 'disable')) {
+      return;
+    }
+    setEnableToggling(true);
+    try {
+      await agentApi.updateAgent(buildAgentStatusUpdateData(namespaceId, agent, enabled));
+      toast.success(t('agent.updateSuccess'));
+      await loadOverview();
+    } finally {
+      setEnableToggling(false);
+    }
+  };
+
+  if (detailLoading && !currentOverview) {
+    return (
+      <div className="space-y-4">
+        <Skeleton className="h-32 w-full" />
+        <Skeleton className="h-96 w-full" />
+      </div>
+    );
+  }
+
+  if (!currentOverview) {
+    return (
+      <div className="flex flex-col items-center justify-center py-24 gap-3">
+        <p className="text-sm text-destructive">{error || t('agent.loadFailed')}</p>
+        <Button variant="outline" onClick={() => navigate('/agentManagement')}>
+          {t('agent.backToList')}
+        </Button>
+      </div>
+    );
+  }
+
+  const agent = currentOverview.agent;
+  const currentPipelineInfo = parsePipelineInfo(currentVersion?.publishPipelineInfo);
+  const actions = currentVersion
+    ? getVersionActions(currentVersion.status, currentPipelineInfo, globalAdmin)
+    : [];
+  const canManageVisibility = globalAdmin || Boolean(username && agent.owner === username);
+  const onlineVersionCount = agent.versionInfo?.onlineVersions?.length
+    ?? 0;
+  const latestVersion = agent.versionInfo?.labels?.latest;
+  const canCreateDraftFrom = currentVersion?.status === 'online'
+    || currentVersion?.status === 'offline';
+  const hasUnpublishedVersion = Boolean(
+    agent.versionInfo?.editingVersion || agent.versionInfo?.reviewingVersion,
+  );
+
+  return (
+    <div className="space-y-5">
+      <div className="relative overflow-hidden rounded-xl border bg-card">
+        <div className="absolute inset-0 bg-gradient-to-br from-violet-500/[0.04] via-transparent to-fuchsia-500/[0.03]" />
+        <div className="relative p-5">
+          <div className="mb-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+            <Button
+              variant="ghost"
+              size="sm"
+              className="-ml-2 h-7 w-fit text-muted-foreground hover:text-foreground"
+              onClick={() => navigate('/agentManagement')}
+            >
+              <ArrowLeft className="mr-1.5 h-3.5 w-3.5" />
+              {t('agent.backToList')}
+            </Button>
+            <div className="flex flex-wrap items-center gap-2">
+              {selectedVersion && (
+                <Select value={selectedVersion} onValueChange={setSelectedVersion}>
+                  <SelectTrigger className="h-7 w-[160px] bg-background/80 text-xs">
+                    <SelectValue placeholder={t('agent.selectVersion')} />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {(versionPage?.pageItems || []).map((version) => (
+                      <SelectItem key={version.version} value={version.version}>
+                        <AiVersionSelectOption
+                          version={version.version}
+                          status={version.status ?? undefined}
+                          latest={latestVersion === version.version}
+                          publishPipelineInfo={version.publishPipelineInfo}
+                          labels={{
+                            latest: t('agent.latestBadge'),
+                            draft: t('agent.statusDraft'),
+                            reviewing: t('agent.statusReviewing'),
+                            pendingPublish: t('agent.statusPendingPublish'),
+                            rejected: t('agent.statusRejected'),
+                          }}
+                        />
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              )}
+              <Button
+                variant="outline"
+                size="sm"
+                className="h-7 gap-1.5 text-xs"
+                onClick={() => editPath('metadata')}
+              >
+                <Pencil className="mr-1.5 h-3.5 w-3.5" />
+                {t('agent.editMetadata')}
+              </Button>
+              <Button
+                variant="outline"
+                size="sm"
+                className="h-7 text-xs"
+                onClick={() => setVersionSheetOpen(true)}
+              >
+                <History className="mr-1 h-3 w-3" />
+                {t('agent.versionHistory')}
+              </Button>
+            </div>
+          </div>
+          <div className="flex items-start gap-4">
+            <div className="flex h-14 w-14 shrink-0 items-center justify-center rounded-xl bg-gradient-to-br from-violet-500 to-fuchsia-400 shadow-lg shadow-violet-500/20">
+              <Bot className="h-7 w-7 text-white" />
+            </div>
+            <div className="min-w-0 flex-1">
+              <div className="mb-1 flex items-center gap-2.5">
+                <h1 className="text-xl font-bold tracking-tight">
+                  {agent.displayName || agent.agentName}
+                </h1>
+                {currentVersion && (
+                  <span className="rounded bg-muted/60 px-1.5 py-0.5 font-mono text-xs text-muted-foreground">
+                    {currentVersion.version}
+                  </span>
+                )}
+              </div>
+              <AiResourceStatusControls
+                enabled={agent.status === 'enable'}
+                scope={agent.scope ?? undefined}
+                enabledLabel={t('agent.enabled')}
+                disabledLabel={t('agent.disabled')}
+                publicLabel={t('agent.publicScope')}
+                privateLabel={t('agent.privateScope')}
+                enableDisabled={enableToggling}
+                scopeDisabled={scopeToggling}
+                onScopeChange={toggleAgentScope}
+                onEnabledChange={toggleAgentEnable}
+                visibilityLabel={canManageVisibility
+                  ? t('common.visibilityAuthorization.entry')
+                  : undefined}
+                visibilityTooltip={t('common.visibilityAuthorization.title')}
+                onVisibilityClick={canManageVisibility
+                  ? () => setVisibilityDialogOpen(true)
+                  : undefined}
+              />
+              <p className="mt-1 font-mono text-xs text-muted-foreground">{agent.agentName}</p>
+              <p className="mt-2 max-w-2xl text-sm leading-relaxed text-muted-foreground">
+                {agent.description || '-'}
+              </p>
+              <div className="mt-2 flex flex-wrap items-center gap-4 text-xs text-muted-foreground">
+                <span className="inline-flex items-center gap-1">
+                  <Globe className="h-3 w-3" />
+                  {t('agent.onlineVersions')}: {onlineVersionCount}
+                </span>
+                {!!agent.updateTime && agent.updateTime > 0 && (
+                  <span className="inline-flex items-center gap-1">
+                    <Clock className="h-3 w-3" />
+                    {formatTime(agent.updateTime)}
+                  </span>
+                )}
+                {currentVersion?.changeDescription && (
+                  <span className="inline-flex items-center gap-1">
+                    <FilePenLine className="h-3 w-3" />
+                    {currentVersion.changeDescription}
+                  </span>
+                )}
+              </div>
+              {currentVersion && (actions.length > 0 || canCreateDraftFrom) && (
+                <VersionLifecycleActionBar>
+                  {actions.map((action) => (
+                    <Fragment key={action}>
+                      {currentVersion.status === 'draft' && action === 'submit' && (
+                        <VersionLifecycleActionDivider />
+                      )}
+                      <Button
+                        size="sm"
+                        variant={action === 'submit'
+                          || action === 'publish'
+                          || action === 'online'
+                          ? 'default'
+                          : 'outline'}
+                        className={action === 'forcePublish'
+                          ? 'h-7 gap-1.5 border-destructive/40 text-xs text-destructive hover:bg-destructive/10 hover:text-destructive'
+                          : action === 'deleteDraft'
+                            ? 'h-7 gap-1.5 text-xs text-destructive hover:bg-destructive/10 hover:text-destructive'
+                            : 'h-7 gap-1.5 text-xs'}
+                        disabled={actionLoading || (action === 'publish'
+                          && !!currentPipelineInfo
+                          && currentPipelineInfo.status !== 'APPROVED')}
+                        onClick={() => {
+                          if (action === 'editDraft') {
+                            editPath('draft-edit', currentVersion.version);
+                          } else if (action === 'deleteDraft') {
+                            deleteDraft();
+                          } else {
+                            runLifecycleAction(action);
+                          }
+                        }}
+                      >
+                        <ActionIcon action={action} />
+                        {actionLabel(t, action)}
+                      </Button>
+                    </Fragment>
+                  ))}
+                  {canCreateDraftFrom && (
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="h-7 gap-1.5 text-xs"
+                      disabled={actionLoading || hasUnpublishedVersion}
+                      title={hasUnpublishedVersion ? t('agent.draftExistsTip') : undefined}
+                      onClick={() => editPath(
+                        'draft-create',
+                        undefined,
+                        currentVersion.version,
+                      )}
+                    >
+                      <Plus className="h-3.5 w-3.5" />
+                      {t('agent.createDraftFrom')}
+                    </Button>
+                  )}
+                </VersionLifecycleActionBar>
+              )}
+              {!currentVersion && currentOverview.versionPage.totalCount === 0 && (
+                <VersionLifecycleActionBar>
+                  <Button
+                    size="sm"
+                    className="h-7 gap-1.5 text-xs"
+                    onClick={() => editPath('draft-create')}
+                  >
+                    <Plus className="h-3.5 w-3.5" />
+                    {t('agent.createDraft')}
+                  </Button>
+                </VersionLifecycleActionBar>
+              )}
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div className="grid grid-cols-1 xl:grid-cols-3 gap-5">
+        <div className="xl:col-span-2 space-y-5">
+          <Card className="py-0 gap-0 overflow-hidden">
+            <div className="px-5 py-3.5 border-b bg-muted/30 flex items-center justify-between">
+              <h2 className="flex items-center gap-2 text-sm font-semibold">
+                <Layers3 className="h-4 w-4" />
+                {t('agent.supportedProtocols')}
+              </h2>
+              <span className="text-xs text-muted-foreground">
+                {protocols.length}
+              </span>
+            </div>
+            <CardContent className="p-5 space-y-4">
+              {currentVersion ? (
+                <>
+                  {protocols.length === 0 ? (
+                    <p className="text-sm text-muted-foreground">{t('agent.noCallInterfaces')}</p>
+                  ) : (
+                      <Tabs value={selectedProtocol} onValueChange={setSelectedProtocol}>
+                        <div className="overflow-x-auto pb-1">
+                          <TabsList className="w-max min-w-full justify-start">
+                          {protocols.map((protocol) => (
+                            <TabsTrigger key={protocol} value={protocol}>
+                              {formatProtocolLabel(protocol)}
+                            </TabsTrigger>
+                          ))}
+                          </TabsList>
+                        </div>
+                      {selectedInterface && (
+                        <TabsContent value={selectedProtocol} className="mt-4 space-y-4">
+                          <div className="rounded-lg border bg-muted/15 p-4">
+                          <div className="grid grid-cols-1 gap-3 text-sm md:grid-cols-2 xl:grid-cols-4">
+                            <Info
+                              label={t('agent.protocol')}
+                              value={formatProtocolLabel(selectedInterface.protocol)}
+                            />
+                            <Info
+                              label={t('agent.protocolVersion')}
+                              value={selectedInterface.protocolVersion || '-'}
+                            />
+                            <Info
+                              label={t('agent.descriptorMediaType')}
+                              value={selectedInterface.descriptorMediaType || '-'}
+                            />
+                            <Info
+                              label={t('agent.sourceOrder')}
+                              value={sourceOrderLabelKey ? t(sourceOrderLabelKey) : '-'}
+                            />
+                          </div>
+                          </div>
+                          <div className="space-y-2">
+                            <div className="flex items-center justify-between">
+                              <h3 className="text-xs font-medium">
+                                {t('agent.declaredEndpoints')}
+                              </h3>
+                              <span className="text-xs text-muted-foreground">
+                                {t('agent.declaredEndpointCount', {
+                                  count: declaredEndpointsOf(selectedInterface).length,
+                                })}
+                              </span>
+                            </div>
+                            {declaredEndpointsOf(selectedInterface).length === 0 ? (
+                              <div className="rounded-lg border border-dashed p-3 text-xs text-muted-foreground">
+                                {t('agent.noDeclaredEndpoints')}
+                              </div>
+                            ) : (
+                              <div className="space-y-2">
+                                {declaredEndpointsOf(selectedInterface).map((endpoint) => (
+                                  <div
+                                    key={`${endpoint.uri}@@${endpoint.transport}`}
+                                    className="flex flex-col gap-1 rounded-lg border bg-muted/10 p-3 sm:flex-row sm:items-center sm:justify-between"
+                                  >
+                                    <span className="break-all font-mono text-xs">
+                                      {endpoint.uri}
+                                    </span>
+                                    <Badge variant="outline">{endpoint.transport}</Badge>
+                                  </div>
+                                ))}
+                              </div>
+                            )}
+                          </div>
+                          <h3 className="text-xs font-medium">
+                            {t('agent.nativeDescriptorTitle')}
+                          </h3>
+                          <pre className="max-h-80 overflow-auto rounded-lg bg-muted/40 p-3 text-xs">
+                            {JSON.stringify(selectedInterface.nativeDescriptor, null, 2)}
+                          </pre>
+                        </TabsContent>
+                      )}
+                      </Tabs>
+                  )}
+                </>
+              ) : (
+                <p className="text-sm text-muted-foreground">{t('agent.selectVersion')}</p>
+              )}
+            </CardContent>
+          </Card>
+
+          {currentVersion && selectedProtocol && (
+            <Card className="py-0 gap-0 overflow-hidden">
+              <div className="px-5 py-3.5 border-b bg-muted/30 flex items-center justify-between">
+                <h2 className="text-sm font-semibold flex items-center gap-2">
+                  <Server className="h-4 w-4" />
+                  {t('agent.runtimeEndpoints')}
+                </h2>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  disabled={runtimeLoading}
+                  onClick={() => fetchRuntime(
+                    namespaceId,
+                    agentName,
+                    currentVersion.version,
+                    selectedProtocol,
+                    true,
+                  )}
+                >
+                  <RefreshCw className="mr-1.5 h-3.5 w-3.5" />
+                  {t('common.refresh')}
+                </Button>
+              </div>
+              <CardContent className="p-5 space-y-4">
+                {runtimeLoading && !runtimeView ? (
+                  <Skeleton className="h-24 w-full" />
+                ) : (runtimeView?.runtimeEndpointSnapshot.callInterface.endpointSets?.[0]?.endpoints || []).length === 0 ? (
+                  <p className="text-sm text-muted-foreground">{t('agent.noRuntimeEndpoints')}</p>
+                ) : (
+                  <div className="space-y-2">
+                    {runtimeView?.runtimeEndpointSnapshot.callInterface.endpointSets?.[0]?.endpoints.map((item) => (
+                      <div key={`${item.uri}@@${item.transport}`} className="rounded-lg border p-3">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <span className="font-mono text-sm break-all">{item.uri}</span>
+                          <Badge>{runtimeEndpointStatus(item)}</Badge>
+                          <Badge variant="outline">{item.transport}</Badge>
+                        </div>
+                        <p className="text-xs text-muted-foreground mt-2">
+                          {(item.bindings || []).map(
+                            (binding) => `${binding.runtimeVersion} → ${binding.versionRange}`,
+                          ).join(', ')}
+                        </p>
+                        <p className="text-xs text-muted-foreground mt-1">
+                          {formatTime(runtimeView?.runtimeEndpointSnapshot.callInterface.endpointSets?.[0]?.lastUpdatedTime)}
+                        </p>
+                      </div>
+                    ))}
+                  </div>
+                )}
+                {runtimeView?.namingServiceRef && (
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => navigate(namingDetailPath(runtimeView.namingServiceRef))}
+                  >
+                    <ExternalLink className="mr-1.5 h-3.5 w-3.5" />
+                    {runtimeView.namingServiceRef.groupName}
+                    @@
+                    {runtimeView.namingServiceRef.serviceName}
+                  </Button>
+                )}
+                <p className="text-xs text-muted-foreground">
+                  {t('agent.runtimeReadonly')}
+                </p>
+              </CardContent>
+            </Card>
+          )}
+        </div>
+
+        <div className="space-y-5">
+          <Card className="py-0 gap-0 overflow-hidden">
+            <div className="px-5 py-3.5 border-b bg-muted/30">
+              <h2 className="text-sm font-semibold">{t('agent.metadata')}</h2>
+            </div>
+            <CardContent className="p-5 space-y-3">
+              <Info label={t('agent.owner')} value={agent.owner || '-'} />
+              <Info label={t('agent.provider')} value={agent.provider?.name || '-'} />
+              <div>
+                <p className="text-xs text-muted-foreground">{t('agent.tags')}</p>
+                {(agent.tags || []).length > 0 ? (
+                  <div className="mt-1.5 flex flex-wrap gap-1.5">
+                    {agent.tags?.map((tag) => <DetailTagChip key={tag} label={tag} />)}
+                  </div>
+                ) : (
+                  <p className="text-sm">-</p>
+                )}
+              </div>
+              <Info
+                label={t('agent.latestVersion')}
+                value={agent.versionInfo?.labels?.latest || '-'}
+              />
+              <Info
+                label={t('agent.onlineVersions')}
+                value={String(agent.versionInfo?.onlineVersions?.length || 0)}
+              />
+            </CardContent>
+          </Card>
+
+          <Card className="py-0 gap-0 overflow-hidden">
+            <div className="px-5 py-3.5 border-b bg-muted/30">
+              <h2 className="text-sm font-semibold">{t('agent.customLabels')}</h2>
+            </div>
+            <CardContent className="p-5 space-y-3">
+              <Textarea
+                value={labelsText}
+                rows={5}
+                className="font-mono text-xs"
+                onChange={(event) => setLabelsText(event.target.value)}
+              />
+              <Button size="sm" onClick={updateLabels}>{t('common.save')}</Button>
+              <p className="text-xs text-muted-foreground">{t('agent.latestLabelManaged')}</p>
+            </CardContent>
+          </Card>
+
+        </div>
+      </div>
+
+      <Sheet open={versionSheetOpen} onOpenChange={setVersionSheetOpen}>
+        <SheetContent className="flex flex-col p-0 sm:max-w-md">
+          <SheetHeader className="shrink-0 border-b px-6 pb-4 pt-6">
+            <SheetTitle className="flex items-center gap-2">
+              <History className="h-4.5 w-4.5 text-violet-500" />
+              {t('agent.versionHistory')}
+            </SheetTitle>
+            <SheetDescription>
+              {t('agent.totalVersions', {
+                count: versionPage?.totalCount ?? currentOverview.versionPage.totalCount,
+              })}
+            </SheetDescription>
+          </SheetHeader>
+          <div className="flex-1 overflow-y-auto px-4 py-4">
+            {currentOverview.versionPage.totalCount === 0 && (
+              <Button
+                variant="outline"
+                size="sm"
+                className="mb-3 w-full"
+                onClick={() => editPath('draft-create')}
+              >
+                <Plus className="mr-1 h-3.5 w-3.5" />
+                {t('agent.createDraft')}
+              </Button>
+            )}
+            {currentOverview.versionPage.totalCount > 0 && (
+              <Select
+                value={versionStatus}
+                onValueChange={(value) => {
+                  setVersionStatus(value as AgentVersionStatus | 'ALL');
+                  setVersionPageNo(1);
+                }}
+              >
+                <SelectTrigger className="mb-3"><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="ALL">{t('common.all')}</SelectItem>
+                  {VERSION_STATUSES.map((status) => (
+                    <SelectItem key={status} value={status}>
+                      {versionStatusLabel(t, status)}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            )}
+            <div className="space-y-2">
+              {(versionPage?.pageItems || []).map((version: AgentVersionSummary) => (
+                <button
+                  key={version.version}
+                  className={`w-full rounded-lg border p-3 text-left transition-colors hover:bg-muted/40 ${
+                    version.version === selectedVersion
+                      ? 'border-violet-500/40 bg-violet-500/5'
+                      : ''
+                  }`}
+                  onClick={() => {
+                    setSelectedVersion(version.version);
+                    setVersionSheetOpen(false);
+                  }}
+                >
+                  <div className="flex justify-between gap-2">
+                    <span className="font-mono text-sm font-medium">{version.version}</span>
+                    {version.status && (
+                      <Badge variant="outline">
+                        {versionStatusLabel(t, version.status)}
+                      </Badge>
+                    )}
+                  </div>
+                  <div className="mt-1 flex items-center gap-3 text-[11px] text-muted-foreground">
+                    {version.author && <span>{version.author}</span>}
+                    <span className="inline-flex items-center gap-1">
+                      <Clock className="h-3 w-3" />
+                      {formatTime(version.updateTime)}
+                    </span>
+                  </div>
+                  <p className="mt-1 text-xs text-muted-foreground">
+                    {version.changeDescription || '-'}
+                  </p>
+                </button>
+              ))}
+              {(versionPage?.pageItems || []).length === 0 && (
+                <p className="py-8 text-center text-sm text-muted-foreground">
+                  {t('agent.noVersions')}
+                </p>
+              )}
+            </div>
+            {(versionPage?.pagesAvailable || 0) > 1 && (
+              <div className="mt-3 flex items-center justify-between">
+                <Button
+                  variant="outline"
+                  size="sm"
+                  disabled={versionPageNo <= 1}
+                  onClick={() => setVersionPageNo((value) => value - 1)}
+                >
+                  {t('common.previous')}
+                </Button>
+                <span className="text-xs">{versionPageNo}/{versionPage?.pagesAvailable}</span>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  disabled={versionPageNo >= (versionPage?.pagesAvailable || 1)}
+                  onClick={() => setVersionPageNo((value) => value + 1)}
+                >
+                  {t('common.next')}
+                </Button>
+              </div>
+            )}
+          </div>
+        </SheetContent>
+      </Sheet>
+      <VisibilityAuthorizationDialog
+        open={visibilityDialogOpen}
+        namespaceId={namespaceId}
+        resourceType="agent"
+        resourceName={agentName}
+        onOpenChange={setVisibilityDialogOpen}
+        onSuccess={async () => {
+          await loadOverview();
+        }}
+      />
+    </div>
+  );
+}
+
+function Info({ label, value }: { label: string; value: string }) {
+  return (
+    <div>
+      <p className="text-xs text-muted-foreground">{label}</p>
+      <p className="text-sm break-words">{value}</p>
+    </div>
+  );
+}

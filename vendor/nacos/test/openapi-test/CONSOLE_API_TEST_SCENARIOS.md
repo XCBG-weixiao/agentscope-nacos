@@ -1,0 +1,217 @@
+<!--
+  Copyright 1999-2026 Alibaba Group Holding Ltd.
+
+  Licensed under the Apache License, Version 2.0 (the "License");
+  you may not use this file except in compliance with the License.
+  You may obtain a copy of the License at
+
+       https://www.apache.org/licenses/LICENSE-2.0
+
+  Unless required by applicable law or agreed to in writing, software
+  distributed under the License is distributed on an "AS IS" BASIS,
+  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+  See the License for the specific language governing permissions and
+  limitations under the License.
+-->
+
+# Console API IT Scenario Index
+
+This document records which console API operations are covered by the
+standalone-server IT classes under
+`src/test/java/com/alibaba/nacos/test/consoleapi`.
+
+Source API surface: console swagger at `https://nacos.io/swagger/console/zh/api.json`.
+The branch-level coverage target is API scenario coverage: expected capability,
+boundary/validation behavior, and controlled exception/error handling.
+
+## Visibility scope extension compatibility
+
+VisibilityScopeAdminApiOpenApiITCase and VisibilityScopeConsoleApiOpenApiITCase reject
+unregistered TEAM_EDIT on Agent/Skill/AgentSpec list
+and scope updates with HTTP 400 / PARAMETER_VALIDATE_ERROR. PUBLIC/PRIVATE lifecycle,
+missing parameters and pagination remain covered by existing scenarios. Plugin success
+is covered by registry/Form/query tests. Extended-plugin deployments are outside the
+default standalone HTTP suite. Surface counts and classifications remain unchanged.
+
+## Status Legend
+
+| Status | Meaning |
+| --- | --- |
+| Covered | The current IT verifies the expected behavior and its important result shape. |
+| Partial | The current IT verifies representative behavior, but important public API scenarios remain. |
+| Pending | No IT currently verifies this public API scenario. |
+
+## Authorization Metadata Coverage
+
+The unified default-auth functional workflow executes every Console API functional
+scenario as the global administrator. `AuthScopeGuardITCase` separately proves
+that anonymous and ordinary Client identities cannot use a representative
+Console operation while public liveness remains available. A focused Console
+module test continues to verify the corrected `@Secured` metadata for Cluster
+nodes, Config listener/beta, A2A version list, AI force-publish, and Copilot
+configuration endpoints. AgentSpec parser tests additionally verify plural
+path recognition, namespace-range list semantics, and draft target resolution
+from `agentSpecCard.name`.
+
+## AI Resource Deletion Failure Coverage
+
+The Agent, AgentSpec, Prompt, and Skill rows cover successful deletion and
+post-delete absence. Storage-provider failure, multi-file partial failure,
+persisted-provider routing, and deletion beyond one storage page are covered by
+focused service tests because the standalone profile has no storage
+fault-injection provider. The service tests verify that cleanup errors reach the
+API layer and resource/version descriptors remain available for retry.
+
+## Core, Health, Plugin, And Server
+
+| API surface / IT class | Covered API operations | Current status | Current / missing coverage |
+| --- | --- | --- | --- |
+| `HealthConsoleApiOpenApiITCase` | `GET /v3/console/health/liveness`<br>`GET /v3/console/health/readiness` | Covered | Verifies health endpoints return wrapped success bodies with `ok`; validates the console port/base path contract. These APIs have no request parameters, so boundary coverage is limited to response contract shape. |
+| `NamespaceConsoleApiOpenApiITCase` | `GET,PUT,POST,DELETE /v3/console/core/namespace`<br>`GET /v3/console/core/namespace/exist`<br>`GET /v3/console/core/namespace/list` | Covered | Creates, queries, updates, lists, checks existence, and deletes a namespace; validates missing required fields, invalid or overlong namespace IDs/names, duplicate create, and absent namespace behavior. Identity-only list/existence authorization is additionally exercised by `IdentityOnlyAuthorizationITCase` in merged and independent Console modes. |
+| `ClusterConsoleApiOpenApiITCase` | `GET /v3/console/core/cluster/nodes` | Covered | Verifies standalone cluster node list shape, node identity fields, and wrapped response contract. The endpoint has no request parameters in the swagger surface. |
+| `ServerStateConsoleApiOpenApiITCase` | `GET /v3/console/server/state`<br>`GET /v3/console/server/announcement`<br>`GET /v3/console/server/guide` | Covered | Verifies server state exposes expected state keys and announcement/guide endpoints return controlled wrapped data in the default standalone environment. These APIs do not mutate state. |
+| `PluginConsoleApiOpenApiITCase` | `GET /v3/console/plugin`<br>`GET /v3/console/plugin/list`<br>`GET /v3/console/plugin/availability`<br>`GET /v3/console/plugin/config`<br>`PUT /v3/console/plugin/config`<br>`PUT /v3/console/plugin/status` | Partial | Verifies enabled plugin availability values and node counts against the list entry, missing availability parameters and unknown-plugin errors, and plugin list/detail/availability response shapes, including `typeCritical`, `executionMode`, `exclusive`, and the `configValueMetas` map shape; verifies the built-in `auth:nacos`, `auth:ldap`, and `auth:oidc` definitions, legacy aliases, effect modes, effective values, source metadata, and secret metadata/masking; verifies a local-only runtime update and empty-map source clear through refreshed detail metadata; verifies that critical disable, exclusive runtime-switch, and OIDC restart-only updates are rejected; covers controlled validation/not-found errors and rejection of config updates for non-configurable plugins. Standalone IT covers local availability only; cross-node fan-out requires a cluster and is not exercised here. Core payload regression tests cover SPI registration and request/response serialization for both single-plugin and query-all probes (issue #15836). Persisted runtime mutation is not exercised to avoid carrying plugin state into later SDK suites. Anonymous AI access is not exercised by standalone OpenAPI IT; explicit credential presence, blank credential rejection, and HTTP 403 `ACCESS_DENIED` error mapping are covered by auth/core unit tests. Persisted full-map replacement/removal, key normalization, runtime/restart checks, same-source sensitive value preservation, persistence failure isolation, and retained-source apply failure/retry are covered by core and plugin unit tests. |
+
+## Config
+
+| API surface / IT class | Covered API operations | Current status | Current / missing coverage |
+| --- | --- | --- | --- |
+| `ConfigConsoleApiOpenApiITCase` | `GET,POST,DELETE /v3/console/cs/config` | Covered | Publishes, queries, updates, and deletes config; verifies content, md5, type, description, config tags, namespace/group defaults into current `public` storage, embedded dots in names, rejection of exact `.`/`..` identity segments, missing required fields, invalid type, and absent config behavior. Removed empty-tenant migration and dual-write behavior is outside the 3.3 console API contract.  Inherited optional `srcUser`/`appName` binding and persisted detail fields are covered, including the Native remote-Console regression. |
+| `ConfigListConsoleApiOpenApiITCase` | `GET /v3/console/cs/config/list`<br>`GET /v3/console/cs/config/searchDetail` | Covered | Verifies list/search pagination shape, accurate and blur search behavior, dataId/group/content filters, empty pages, page validation, and required search parameters. |
+| `ConfigListenerConsoleApiOpenApiITCase` | `GET /v3/console/cs/config/listener`<br>`GET /v3/console/cs/config/listener/ip` | Covered | Verifies listener status response shape for config and IP scoped queries, missing dataId/group validation, query type fields, and controlled empty listener state. |
+| `ConfigHistoryConsoleApiOpenApiITCase` | `GET /v3/console/cs/history`<br>`GET /v3/console/cs/history/list`<br>`GET /v3/console/cs/history/previous`<br>`GET /v3/console/cs/history/configs` | Covered | Publishes versioned config changes and verifies history list/detail/previous/config snapshots, including storage IDs represented as JSON strings; validates missing identifiers, pagination, and absent history/config behavior. |
+| `ConfigBetaConsoleApiOpenApiITCase` | `GET,DELETE /v3/console/cs/config/beta` | Covered | Publishes current gray-backed beta config through console headers, queries and deletes beta content, and verifies missing/absent beta responses stay wrapped and non-500. Removed `config_info_beta` old-table migration is not an expected scenario. |
+| `ConfigBatchDeleteConsoleApiOpenApiITCase` | `DELETE /v3/console/cs/config/batchDelete` | Covered | Creates multiple configs, deletes them through the batch API, verifies absence, skips ids outside the requested namespace, and validates missing/empty IDs and malformed batch input. |
+| `ConfigExportConsoleApiOpenApiITCase` | `GET /v3/console/cs/config/export2` | Covered | Exports existing config data, verifies file response and exported content, skips ids outside the requested namespace, and validates empty export, missing namespace/group filters, and controlled bad request cases. |
+| `ConfigImportConsoleApiOpenApiITCase` | `POST /v3/console/cs/config/import` | Covered | Imports zipped config payloads, verifies persisted imported data, overwrite behavior, malformed archive handling, and import result structure for success and failure cases. |
+| `ConfigCloneConsoleApiOpenApiITCase` | `POST /v3/console/cs/config/clone` | Covered | Clones config from source `namespaceId` to `targetNamespaceId`, verifies target content and metadata, covers source-scoped ID resolution, IDs outside the source namespace returning controlled `DATA_EMPTY`, and validates missing target namespace, empty selection, malformed clone payload, and absent source config behavior. |
+
+## Naming
+
+| API surface / IT class | Covered API operations | Current status | Current / missing coverage |
+| --- | --- | --- | --- |
+| `ServiceConsoleApiOpenApiITCase` | `GET,PUT,POST,DELETE /v3/console/ns/service`<br>`GET /v3/console/ns/service/list`<br>`GET /v3/console/ns/service/selector/types`<br>`GET /v3/console/ns/service/subscribers` | Covered | Creates, queries, updates, lists, and deletes services; verifies selector type list, empty subscriber page shape, namespace/group defaults, duplicate create, invalid service/group/page fields, and absent service errors. Native regression reuses these cases to assert actual service names/groups and metadata values, not only HTTP success. |
+| `ServiceClusterConsoleApiOpenApiITCase` | `PUT /v3/console/ns/service/cluster` | Covered | Creates service cluster metadata, verifies cluster-specific service detail/list behavior, validates missing fields and absent services, accepts HTTP relative path/query targets, rejects origin-overriding targets and unsafe headers, and verifies rejected metadata is not written. |
+| `InstanceConsoleApiOpenApiITCase` | `PUT,DELETE /v3/console/ns/instance`<br>`GET /v3/console/ns/instance/list` | Covered | Registers setup service/instance, updates instance metadata/weight/enabled fields, lists instance state, deletes the instance, and validates missing IP/port/service, invalid port/weight, absent service, and controlled not-found behavior. |
+
+## AI Registry And Copilot
+
+MCP Version summaries and exact details expose optional `publishPipelineInfo`
+so the Console can distinguish approved and rejected reviews. The standalone
+profile has no MCP review Pipeline plugin, so the existing MCP row covers the
+no-Pipeline response while focused component tests cover both terminal
+Pipeline payloads and force-publish visibility.
+
+Agent Version summaries and exact details expose optional
+`publishPipelineInfo` as well. `AgentConsoleApiOpenApiITCase` verifies omission
+before a review Pipeline exists; focused frontend tests cover the terminal
+rejection and the resulting force-publish visibility rule.
+
+| API surface / IT class | Covered API operations | Current status | Current / missing coverage |
+| --- | --- | --- | --- |
+| `A2aConsoleApiOpenApiITCase` | `GET,PUT,POST,DELETE /v3/console/ai/a2a`<br>`GET /v3/console/ai/a2a/list`<br>`GET /v3/console/ai/a2a/version/list` | Covered | Registers legacy and v1 AgentCards, verifies normalized fields and latest/version queries, updates a new version, lists by accurate/blur search, deletes resources, and validates missing names, bad search, invalid registration type, malformed JSON, incomplete endpoint definitions, and absent agents. Cross-contract scenarios verify legacy Console create through canonical Console Overview/Version reads, legacy Admin create through canonical Console reads across the 8848/8080 boundary, and canonical Console draft/force-publish through both legacy Console and Admin reads. |
+| `AgentConsoleApiOpenApiITCase`<br>`AgentEndpointClientOpenApiITCase` | `GET,PUT,DELETE /v3/console/ai/agents`<br>`GET /v3/console/ai/agents/list`<br>`GET /v3/console/ai/agents/versions`<br>`GET /v3/console/ai/agents/version`<br>`GET /v3/console/ai/agents/runtime-endpoints`<br>`POST,PUT,DELETE /v3/console/ai/agents/draft`<br>`POST /v3/console/ai/agents/submit`<br>`POST /v3/console/ai/agents/publish`<br>`POST /v3/console/ai/agents/force-publish`<br>`POST /v3/console/ai/agents/redraft`<br>`POST /v3/console/ai/agents/online`<br>`POST /v3/console/ai/agents/offline`<br>`PUT /v3/console/ai/agents/labels`<br>`PUT /v3/console/ai/agents/scope` | Covered | Verifies the complete protocol-neutral Agent Console facade with form-encoded draft creation/update/deletion, metadata update, overview/list/version reads, submit, force publish, labels, online/offline, invalid publish/redraft transitions, and definition deletion. Confirms omitted namespace defaults to `public`, explicit Runtime namespace is retained, and `runtime-endpoints` wraps the unchanged Runtime snapshot with the server-composed Naming service reference. The Client Endpoint workflow cross-validates an Admin-published Agent through Console Overview and verifies that a real Client registration and deregistration appear in the Console Runtime snapshot and retain the expected Naming reference. Validates required identity/protocol, Version, order, pagination, malformed JSON, and absent resources. Includes PUT /v3/console/ai/agents/scope, default PUBLIC, persisted private/public round-trip, and invalid-scope errors. Also verifies unregistered scope rejection for list and scope updates through `VisibilityScopeConsoleApiOpenApiITCase`; registered plugin values are exercised by unit tests. |
+| `McpConsoleApiOpenApiITCase` | `GET,PUT,POST,DELETE /v3/console/ai/mcp`<br>`GET /v3/console/ai/mcp/list`<br>`GET /v3/console/ai/mcp/versions`<br>`GET /v3/console/ai/mcp/version`<br>`POST,PUT,DELETE /v3/console/ai/mcp/draft`<br>`POST /v3/console/ai/mcp/submit`<br>`POST /v3/console/ai/mcp/publish`<br>`POST /v3/console/ai/mcp/force-publish`<br>`POST /v3/console/ai/mcp/redraft`<br>`POST /v3/console/ai/mcp/online`<br>`POST /v3/console/ai/mcp/offline`<br>`PUT /v3/console/ai/mcp/labels`<br>`PUT /v3/console/ai/mcp/status`<br>`PUT /v3/console/ai/mcp/scope`<br>`POST /v3/console/ai/mcp/import/validate` (deprecated)<br>`POST /v3/console/ai/mcp/import/execute` (deprecated) | Partial | Runs only against the stable `LIFECYCLE_MANAGED` state. Creates, queries, updates, lists, and deletes MCP servers; verifies generated ID, latest/allVersions, tool spec, accurate/blur list, duplicate conflict, missing identity/spec/version, invalid ID, malformed JSON, and absent server. The lifecycle surface verifies name-only identity, required exact version, rejection of nested `serverSpecification.id`, absent-target behavior, resource enable/disable and public/private scope, plus draft create/delete/recreate with resource status, owner, scope, writable, labels, working pointers, online count, and retained zero-Version management detail. Embedded and standalone Console use the local lifecycle handler, while remote Console forwards the same typed lifecycle contract through the Maintainer SDK transport. The separate migration suite owns all `SYNCING` and historical-reconciliation assertions. The two legacy import endpoints return HTTP 410 and `API_DEPRECATED` by default, may be reopened together with other gated v3 compatibility APIs through `nacos.core.api.compatibility.enabled=true`, and are planned for removal in 3.4.0; clients must migrate to `/v3/console/ai/import/*`. Console persists the optional `resourceSpecification` through the same lifecycle draft storage path. |
+| `McpToolsImportConsoleApiOpenApiITCase` | `GET /v3/console/ai/mcp/importToolsFromMcp` | Partial | Verifies that private or local targets are rejected by default with an explicit private-allowlist message before network access, the endpoint parameter is required, and unsupported transport returns a wrapped failure. Public-target protocol success, operator-approved private-target success, and optional `authToken` header forwarding require an external MCP runtime plus controlled server configuration and remain an end-to-end gap. Focused Console tests cover the operator switch, public-target policy, exact IP, IPv4/IPv6 CIDR and non-byte-aligned prefix matching, rejection when any DNS result is an unapproved private address, invalid configuration, non-HTTP URLs, unresolvable hosts, and endpoint-origin override. |
+| `PromptConsoleApiOpenApiITCase` | `DELETE /v3/console/ai/prompt`<br>`GET /v3/console/ai/prompt/list`<br>`GET /v3/console/ai/prompt/versions`<br>`GET /v3/console/ai/prompt/governance`<br>`GET /v3/console/ai/prompt/version`<br>`GET /v3/console/ai/prompt/version/download`<br>`POST,PUT,DELETE /v3/console/ai/prompt/draft`<br>`POST /v3/console/ai/prompt/submit`<br>`POST /v3/console/ai/prompt/publish`<br>`POST /v3/console/ai/prompt/force-publish`<br>`POST /v3/console/ai/prompt/redraft`<br>`POST /v3/console/ai/prompt/online`<br>`POST /v3/console/ai/prompt/offline`<br>`PUT /v3/console/ai/prompt/labels`<br>`PUT /v3/console/ai/prompt/description`<br>`PUT /v3/console/ai/prompt/biz-tags` | Partial | Verifies the full functional workflow as the global administrator: prompt draft/update/delete, submit, reviewing-state repeat-submit idempotency, force publish, version detail, governance metadata, version list, list filters, Markdown download, labels, server-managed latest label preservation, publish-parameter compatibility, description/bizTags, online/offline latest maintenance, delete, and absent resource/version errors. Validates missing promptKey/template/version/labels/description, invalid search, publish/redraft state errors, and controlled non-500 failures. Runtime-only legacy prompt endpoints are intentionally not covered because they are not exposed by the console controller. Owner/scope/grant list filtering and unreadable-as-not-found across ordinary identities remain focused-service coverage; caller-identity propagation through an independently deployed Console remains an end-to-end gap. |
+| `SkillConsoleApiOpenApiITCase` | `GET,DELETE /v3/console/ai/skills`<br>`GET /v3/console/ai/skills/list`<br>`GET /v3/console/ai/skills/version`<br>`GET /v3/console/ai/skills/version/download`<br>`POST,PUT,DELETE /v3/console/ai/skills/draft`<br>`POST /v3/console/ai/skills/submit`<br>`POST /v3/console/ai/skills/publish`<br>`POST /v3/console/ai/skills/force-publish`<br>`POST /v3/console/ai/skills/redraft`<br>`POST /v3/console/ai/skills/online`<br>`POST /v3/console/ai/skills/offline`<br>`PUT /v3/console/ai/skills/labels`<br>`PUT /v3/console/ai/skills/biz-tags`<br>`PUT /v3/console/ai/skills/scope` | Covered | Verifies skill draft/update/fork/delete, submit, reviewing-state repeat-submit idempotency, force publish, detail, version detail, list filters, ZIP download, labels, server-managed latest label preservation, publish-parameter compatibility, bizTags, PUBLIC/PRIVATE scope, version-level and skill-level online/offline latest maintenance, delete, and absent resource/version errors. Validates missing skillName/skillCard/targetVersion/version/labels/scope, name mismatch, invalid version/search/scope/page, and invalid lifecycle transitions. Also verifies unregistered scope rejection for list and scope updates through `VisibilityScopeConsoleApiOpenApiITCase`; registered plugin values are exercised by unit tests. |
+| `SkillUploadConsoleApiOpenApiITCase` | `POST /v3/console/ai/skills/upload`<br>`POST /v3/console/ai/skills/upload/precheck`<br>`POST /v3/console/ai/skills/upload/batch` | Covered | Verifies single and batch Skill ZIP upload as the global administrator, ZIP-and-namespace-only server-side precheck, owner, maximum published version (online or offline), predicted target version, single-code reporting, archive entry paths, distinct `NOT_A_SKILL`/`INVALID_SKILL` results, legacy batch `succeeded`/`failed` fields, and per-item `success`, `errorCode`, and `errorMessage` in `results`; validates overwrite behavior, next version generation, version normalization/fallback, upload-time first-available version-source selection when a higher-priority candidate is occupied, partial batch results, empty/malformed ZIP, and upload error envelopes. Permission-denied owner and error-code reporting remains covered by the focused service test until a direct multi-identity multipart scenario is added. |
+| `AgentSpecConsoleApiOpenApiITCase` | `GET,DELETE /v3/console/ai/agentspecs`<br>`GET /v3/console/ai/agentspecs/list`<br>`GET /v3/console/ai/agentspecs/version`<br>`POST,PUT,DELETE /v3/console/ai/agentspecs/draft`<br>`POST /v3/console/ai/agentspecs/submit`<br>`POST /v3/console/ai/agentspecs/publish`<br>`POST /v3/console/ai/agentspecs/force-publish`<br>`POST /v3/console/ai/agentspecs/redraft`<br>`POST /v3/console/ai/agentspecs/online`<br>`POST /v3/console/ai/agentspecs/offline`<br>`PUT /v3/console/ai/agentspecs/labels`<br>`PUT /v3/console/ai/agentspecs/biz-tags`<br>`PUT /v3/console/ai/agentspecs/scope` | Covered | Verifies AgentSpec draft/update/auto-create/fork/delete, submit, reviewing-state repeat-submit idempotency, force publish, detail, version detail, list filters, labels, server-managed latest label preservation, publish-parameter compatibility, bizTags, scope, version-level and resource-level online/offline latest maintenance, delete, and absent resource/version errors. Validates missing agentSpecName/agentSpecCard/targetVersion/version/labels/scope, invalid version/search/scope/page, and invalid lifecycle transitions. The shared `bizTag` filter is accepted but not applied by the AgentSpec service; the IT records that behavior. Also verifies unregistered scope rejection for list and scope updates through `VisibilityScopeConsoleApiOpenApiITCase`; registered plugin values are exercised by unit tests. |
+| `AgentSpecUploadConsoleApiOpenApiITCase` | `POST /v3/console/ai/agentspecs/upload` | Covered | Verifies single AgentSpec ZIP upload from `manifest.json` plus resources, overwrite of an editing draft, next draft version after publish, seed archives importing multiple AgentSpecs, empty file, malformed ZIP, and missing manifest errors. |
+| `AiResourceImportConsoleApiOpenApiITCase` | `GET /v3/console/ai/import/sources`<br>`POST /v3/console/ai/import/search`<br>`POST /v3/console/ai/import/validate`<br>`POST /v3/console/ai/import/execute` | Covered | Verifies enabled managed importer plugins as the source list, resourceType filters, sanitized source info, unsupported resource type empty result, missing resourceType/sourceId/selectedItems, malformed JSON options/selectedItems, empty selected items, unknown source not-found, unsupported source/resourceType combinations, and controlled error bodies without performing external network import. |
+| `PipelineConsoleApiOpenApiITCase` | `GET /v3/console/ai/pipelines`<br>`GET /v3/console/ai/pipelines/list`<br>`GET /v3/console/ai/pipelines/detail`<br>`GET /v3/console/ai/pipelines/{pipelineId}` | Partial | Verifies the current list/detail contracts for resourceType/resourceName/namespaceId/version filters, required resourceType, page validation, required pipelineId, and absent pipeline not-found errors. The deprecated base-path list and path-variable detail endpoints return HTTP 410 and `API_DEPRECATED` by default and may be temporarily reopened with `nacos.core.api.compatibility.enabled=true`. Successful detail creation is not covered in the default standalone IT environment because pipeline rows require configured publish-pipeline plugins. |
+| `CopilotConsoleApiOpenApiITCase` | `GET,POST /v3/console/copilot/config`<br>`POST /v3/console/copilot/skill/optimize`<br>`POST /v3/console/copilot/skill/generate`<br>`POST /v3/console/copilot/prompt/optimize`<br>`POST /v3/console/copilot/prompt/debug` | Partial | Verifies config save/read for API key, model, studio URL, and studio project; records that non-editable config fields are accepted but ignored by the save path. Verifies malformed JSON config error and SSE validation error events for empty bodies and missing required skill/background/prompt/userInput fields without invoking an external LLM provider. |
+
+## Validation Snapshot
+
+The console API IT set was validated with:
+
+- `mvn -pl test/openapi-test spotless:apply`
+- `mvn -pl test/openapi-test spotless:check`
+- `mvn -pl test/openapi-test -DskipTests test-compile`
+- `mvn -pl test/openapi-test -Pintegration-test -DskipTests=false -Dit.test='*ConsoleApiOpenApiITCase' verify`
+- `mvn -pl test/openapi-test -Pintegration-test -DskipTests=false -Dit.test=AgentConsoleApiOpenApiITCase verify`
+
+The full console IT verification ran 75 tests with no failures.
+The Agent Console API verification ran 2 tests with no failures.
+
+## Config detail schema regression (#15853)
+
+`ConfigHistoryConsoleApiOpenApiITCase.testSchemaInCurrentAndHistoricalDetails`
+verifies the following workflow against a standalone server:
+
+| Scenario | Expected result |
+| --- | --- |
+| Publish without schema, then query current detail | `schema` is omitted or JSON null. |
+| Publish two different schema/content versions | Current detail returns the latest stored schema. |
+| Query history detail and previous version | `schema` belongs to the selected historical content, not the current config. |
+| Query an older history record without schema | `schema` is omitted or JSON null. |
+| Read historical `extInfo` | Original extension remains available and contains the historical `c_schema`. |
+| Publish an explicit empty schema | Current detail preserves the empty string. |
+
+Malformed extension JSON and non-text `c_schema` are covered by `ResponseUtilTest`;
+public publish APIs cannot create these legacy/corrupt history records. Existing
+required-parameter, missing-history, and identity-mismatch cases remain applicable.
+
+The inherited `ConfigGrayInfo` response also omits `schema` or returns null for beta
+configurations; the existing beta query IT asserts this boundary.
+
+### Agent 元数据模型合并（2026-09-14）
+
+Agent Console 消费相同 AgentSummary/versionInfo 新结构，保持版本详情与 Runtime 查询分开；固定地址/运行地址模型本轮不变。
+
+### Agent 地址模型统一：实施与验收（2026-09-15）
+
+CallInterface → EndpointSet → Endpoint 统一已落地，验收要求见 [测试矩阵](../../Codex/design/nacos-3.3-client-ai-api/MODEL_ENDPOINT_TEST_PLAN.md)，本轮实际执行见 [验证记录](../../Codex/design/nacos-3.3-client-ai-api/MODEL_ENDPOINT_VALIDATION.md)。healthy 注册可写，服务端维护字段忽略；管理 Runtime 读取改为 `callInterface.endpointSets[].endpoints[]`，状态和绑定位于 Endpoint，观察时间位于 Set。旧 A2A wire 不变。以下原有覆盖状态不以编译通过或历史测试数量自动提升。
+
+### EP-14 双部署成功流程（2026-09-15）
+
+`testUnifiedDefinitionAndNonEmptyRuntimeAcrossConsoleDeploymentModes` 在合并 Console 和独立 Console 各执行一次：创建并发布自定义协议定义，直接向服务端 Client API 注册 `healthy=false` 的非空运行地址，再由 Console 读取统一模型、Naming 跳转引用和观察时间，最后复制版本并核对声明地址及摘要。Client 写请求使用服务端 BASE_URL，不能发到 Console 端口。两种部署均通过。
+
+独立 Console 的既有 A2A/Agent 错误断言有三处失败：远程 ClientHttpProxy 对业务错误重试，最终返回通用 `30000`，丢失原错误码。相关生产代码本轮未改；保留原断言，成功流程另行验证，不能据此将独立部署的错误映射标为通过。详情见上述验证记录。
+
+
+### 2026-09-15 请求整合回归
+
+Agent Console 复用改名后的 Admin Request，现有合并部署和独立 remote Console 场景都需执行，包括定义复制、非空 Runtime 和错误映射。
+
+本轮实际执行状态见 [请求整合验证记录](../../Codex/design/nacos-3.3-client-ai-api/MODEL_REQUEST_VALIDATION.md)。
+既有 Covered/Partial/Pending 表示场景覆盖归属，不表示本轮已重新执行；不能引用前轮结果代替本轮验收。
+
+## Agent JSON 注解移除（2026-09-16）
+
+JSON-04/08：合并/独立 Console 返回的 Runtime CallInterface 无 descriptor 事实，可省略或 null；保持现有错误码断言，CONSOLE-ERR-01 继续单独登记。
+
+[本轮测试矩阵](../../Codex/design/nacos-3.3-client-ai-api/MODEL_JSON_TEST_MATRIX.md)区分待执行项与实际结果。
+
+## CONSOLE-ERR-01 错误透传回归（2026-09-16）
+
+复用 AgentConsoleApiOpenApiITCase 和 A2aConsoleApiOpenApiITCase 原14项，在合并和独立
+Console 各执行一遍，保留原400/404及23000/20004/50100断言、错误详情和成功副作用验证。
+共享 Maintainer 代理的修改另回归 Config/Naming 代表流程；不新增覆盖行、不提升覆盖比例。
+独立部署使用 nacos.deployment.type=console，nacos.console.port 指向该独立进程；Client
+写入仍使用服务端端口。CI 自动运行独立部署仍是后续任务。
+
+结果见 [Console 错误透传验证](../../Codex/design/nacos-3.3-client-ai-api/CONSOLE_ERROR_VALIDATION.md)。
+
+实测：合并22项通过；独立21项通过、1项既有 Naming cluster 失败。Agent/A2A 两种部署各14项
+全部通过，三项原错误码问题已消除。旧构件对照复现三项原失败及相同 Naming 失败，后者登记为
+CONSOLE-NAMING-01；不放宽断言，不将其计为通过。详见上述验证记录。
+
+### Skill frontmatter response scenarios (#15345)
+
+| Scenario | Expected result | Coverage |
+| --- | --- | --- |
+| Create/update draft | List and detail generate name, description and version from summary state, return cached custom fields, and report `frontMatterTruncated=false` for a complete projection. | `testSkillFrontMatterLifecycle` |
+| Bounded custom projection | Resource snapshot excludes reserved fields, prioritizes standard fields, and enforces entry/key/value/serialized-size limits with an explicit truncation flag; complete version metadata remains unchanged. | Service unit tests; standalone IT does not inspect internal metadata rows. |
+| Malformed historical metadata | List and detail remain available and return null frontmatter when `ai_resource.ext` is malformed. | Service unit test; standalone IT cannot seed malformed internal metadata through the public API. |
+| Online v1 plus editing v2 | List/detail descriptions and frontmatter remain on v1 while saving v2; deleting v2 preserves v1. Last-online offline selects v2 while it is unpublished. | `testSkillFrontMatterLifecycle` |
+| Publish v2; offline/online v2 | List switches to v2, falls back to v1, then returns v2 again. | `testSkillFrontMatterLifecycle` |
+| No display version (#15949) | Taking the last online v1 offline preserves its correct description, even with a higher offline v2. List/detail have no latest and onlineCnt=0; frontmatter is null. Repeating offline for historical v2 does not replace the retained description; bringing v1 online restores its snapshot. | `testSkillFrontMatterLifecycle` |
+| Legacy or mismatched snapshot | Null without per-item reads; no historical repair. | Service unit tests; standalone IT does not inject internal historical database rows. |
+| CAS conflict / retry exhaustion | Recompute against the current version; lifecycle operations remain successful and an unmatched snapshot reads as null when best-effort refresh is exhausted. | Service unit tests; deterministic concurrency is not injected through standalone HTTP. |
+C11 repeats the complete AI Console class set against the final artifact's
+independent Console deployment. Agent Runtime assertions require enabled/healthy
+and absence of the removed state field. These executions do not change the
+API-surface denominator; final outcomes and prior intermittent Prompt observations
+are recorded separately in the SDK scenario and coverage records.

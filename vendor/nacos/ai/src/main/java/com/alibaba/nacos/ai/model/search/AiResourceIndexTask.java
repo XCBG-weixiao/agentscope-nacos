@@ -1,0 +1,141 @@
+/*
+ * Copyright 1999-2026 Alibaba Group Holding Ltd.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package com.alibaba.nacos.ai.model.search;
+
+/**
+ * Durable resource-level AI resource index maintenance task.
+ *
+ * @author nacos
+ */
+public class AiResourceIndexTask {
+    
+    public static final String TASK_TYPE = "search_index";
+    
+    public static final String STAGE_BASE_INDEX = "base_index";
+    
+    public static final String STAGE_LLM_ENHANCEMENT = "llm_enhancement";
+    
+    private String taskKey;
+    
+    private String namespaceId;
+    
+    private String taskType;
+    
+    private String resourceType;
+    
+    private String resourceName;
+    
+    private String taskStage;
+    
+    private String status;
+    
+    private boolean enhancementRequested;
+    
+    private int retryCount;
+    
+    private long revision;
+    
+    private long leaseToken;
+    
+    public String getTaskKey() {
+        return taskKey;
+    }
+    
+    public void setTaskKey(String taskKey) {
+        this.taskKey = taskKey;
+    }
+    
+    public String getNamespaceId() {
+        return namespaceId;
+    }
+    
+    public void setNamespaceId(String namespaceId) {
+        this.namespaceId = namespaceId;
+    }
+    
+    public String getTaskType() {
+        return taskType;
+    }
+    
+    public void setTaskType(String taskType) {
+        this.taskType = taskType;
+    }
+    
+    public String getResourceType() {
+        return resourceType;
+    }
+    
+    public void setResourceType(String resourceType) {
+        this.resourceType = resourceType;
+    }
+    
+    public String getResourceName() {
+        return resourceName;
+    }
+    
+    public void setResourceName(String resourceName) {
+        this.resourceName = resourceName;
+    }
+    
+    public String getTaskStage() {
+        return taskStage;
+    }
+    
+    public void setTaskStage(String taskStage) {
+        this.taskStage = taskStage;
+    }
+    
+    public String getStatus() {
+        return status;
+    }
+    
+    public void setStatus(String status) {
+        this.status = status;
+    }
+    
+    public boolean isEnhancementRequested() {
+        return enhancementRequested;
+    }
+    
+    public void setEnhancementRequested(boolean enhancementRequested) {
+        this.enhancementRequested = enhancementRequested;
+    }
+    
+    public int getRetryCount() {
+        return retryCount;
+    }
+    
+    public void setRetryCount(int retryCount) {
+        this.retryCount = retryCount;
+    }
+    
+    public long getRevision() {
+        return revision;
+    }
+    
+    public void setRevision(long revision) {
+        this.revision = revision;
+    }
+    
+    public long getLeaseToken() {
+        return leaseToken;
+    }
+    
+    public void setLeaseToken(long leaseToken) {
+        this.leaseToken = leaseToken;
+    }
+}

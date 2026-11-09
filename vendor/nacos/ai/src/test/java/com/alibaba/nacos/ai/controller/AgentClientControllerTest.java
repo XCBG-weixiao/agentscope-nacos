@@ -1,0 +1,272 @@
+/*
+ * Copyright 1999-2026 Alibaba Group Holding Ltd.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package com.alibaba.nacos.ai.controller;
+
+import com.alibaba.nacos.ai.service.agent.AgentClientMigrationGuard;
+import com.alibaba.nacos.api.ai.constant.AiConstants;
+import com.alibaba.nacos.common.notify.NotifyCenter;
+import com.alibaba.nacos.common.trace.event.ai.AiResourceTraceEvent;
+import com.alibaba.nacos.common.utils.JacksonUtils;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.NullAndEmptySource;
+import org.junit.jupiter.params.provider.ValueSource;
+import org.mockito.ArgumentCaptor;
+import com.fasterxml.jackson.databind.JsonNode;
+import org.mockito.MockedStatic;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.mockStatic;
+import com.alibaba.nacos.api.exception.NacosException;
+import com.alibaba.nacos.api.exception.api.NacosApiException;
+import com.alibaba.nacos.api.model.v2.ErrorCode;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.verifyNoInteractions;
+import com.alibaba.nacos.ai.form.agent.client.AgentDiscoveryForm;
+import com.alibaba.nacos.ai.form.agent.client.AgentEndpointDeregistrationForm;
+import com.alibaba.nacos.ai.form.agent.client.AgentEndpointRegistrationForm;
+import com.alibaba.nacos.ai.form.agent.client.AgentPublishForm;
+import com.alibaba.nacos.ai.form.agent.client.AgentSearchForm;
+import com.alibaba.nacos.ai.form.agent.client.AgentWatchBatchForm;
+import com.alibaba.nacos.ai.service.agent.AgentDiscoveryApplicationService;
+import com.alibaba.nacos.ai.service.agent.AgentPublishApplicationService;
+import com.alibaba.nacos.ai.service.agent.runtime.AgentHttpClientLifecycleService;
+import com.alibaba.nacos.ai.service.agent.watch.AgentHttpWatchService;
+import com.alibaba.nacos.api.ai.model.ClientLivenessInfo;
+import com.alibaba.nacos.api.ai.model.agent.client.AgentPublishRequest;
+import com.alibaba.nacos.api.ai.model.agent.AgentVersionDetail;
+import com.alibaba.nacos.api.ai.model.agent.AgentSummary;
+import com.alibaba.nacos.api.ai.model.agent.AgentDiscoveryRequest;
+import com.alibaba.nacos.api.ai.model.agent.AgentDiscoveryResult;
+import com.alibaba.nacos.api.ai.model.agent.AgentEndpointRegistrationBatch;
+import com.alibaba.nacos.api.ai.model.agent.AgentSearchRequest;
+import com.alibaba.nacos.api.ai.model.agent.AgentWatchBatchRequest;
+import com.alibaba.nacos.api.ai.model.agent.AgentWatchBatchResponse;
+import com.alibaba.nacos.api.common.ApiType;
+import com.alibaba.nacos.api.model.Page;
+import com.alibaba.nacos.api.model.v2.Result;
+import com.alibaba.nacos.auth.annotation.Secured;
+import com.alibaba.nacos.plugin.auth.constant.ActionTypes;
+import com.alibaba.nacos.plugin.auth.constant.SignType;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.context.request.async.DeferredResult;
+
+import java.lang.reflect.Method;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
+
+class AgentClientControllerTest {
+    
+    private final AgentClientMigrationGuard migrationGuard = mock(AgentClientMigrationGuard.class);
+    
+    private AgentDiscoveryApplicationService discoveryService;
+    
+    private AgentHttpClientLifecycleService lifecycleService;
+    
+    private AgentPublishApplicationService publishService;
+    
+    private AgentHttpWatchService watchService;
+    
+    private AgentClientController controller;
+    
+    @BeforeEach
+    void setUp() {
+        discoveryService = mock(AgentDiscoveryApplicationService.class);
+        lifecycleService = mock(AgentHttpClientLifecycleService.class);
+        publishService = mock(AgentPublishApplicationService.class);
+        watchService = mock(AgentHttpWatchService.class);
+        controller = new AgentClientController(discoveryService, lifecycleService,
+            publishService, watchService, migrationGuard);
+    }
+    
+    @Test
+    void testMigrationRejectsBusinessBeforeSideEffectsAndAllowsCleanup() throws Exception {
+        NacosApiException migrating = new NacosApiException(NacosException.CONFLICT,
+            ErrorCode.AGENT_MIGRATION_IN_PROGRESS, "migration");
+        doThrow(migrating).when(migrationGuard).checkReady();
+        AgentDiscoveryForm discovery = mock(AgentDiscoveryForm.class);
+        when(discovery.toRequest()).thenReturn(new AgentDiscoveryRequest());
+        assertSame(migrating, assertThrows(NacosApiException.class,
+            () -> controller.discover(discovery, "client", null)));
+        assertSame(migrating, assertThrows(NacosApiException.class,
+            () -> controller.search(mock(AgentSearchForm.class), "client")));
+        assertSame(migrating, assertThrows(NacosApiException.class,
+            () -> controller.publish(mock(AgentPublishForm.class))));
+        assertSame(migrating, assertThrows(NacosApiException.class,
+            () -> controller.registerEndpoints(mock(AgentEndpointRegistrationForm.class),
+                "client", "AI")));
+        assertSame(migrating, assertThrows(NacosApiException.class,
+            () -> controller.watch(mock(AgentWatchBatchForm.class), "client", "AI")));
+        verifyNoInteractions(discoveryService, publishService, lifecycleService, watchService);
+        controller.deregisterEndpoints(mock(AgentEndpointDeregistrationForm.class), "client", "AI");
+        controller.heartbeat("client", "AI");
+        verify(lifecycleService).heartbeat("client", "AI");
+    }
+    
+    @Test
+    void testPublish() throws Exception {
+        AgentPublishForm form = mock(AgentPublishForm.class);
+        AgentPublishRequest request = new AgentPublishRequest();
+        AgentVersionDetail detail = new AgentVersionDetail();
+        when(form.getNamespaceId()).thenReturn("team");
+        when(form.toRequest()).thenReturn(request);
+        when(publishService.publish("team", request)).thenReturn(detail);
+        assertSame(detail, controller.publish(form).getData());
+    }
+    
+    @Test
+    void testSearch() throws Exception {
+        AgentSearchForm form = mock(AgentSearchForm.class);
+        AgentSearchRequest request = new AgentSearchRequest();
+        Page<AgentSummary> page = new Page<AgentSummary>();
+        when(form.getNamespaceId()).thenReturn("team");
+        when(form.toRequest()).thenReturn(request);
+        when(discoveryService.search("team", request)).thenReturn(page);
+        
+        assertSame(page, controller.search(form, "client").getData());
+        verify(lifecycleService).renewForQuery("client", "team");
+    }
+    
+    @Test
+    void testDiscover() throws Exception {
+        AgentDiscoveryForm form = mock(AgentDiscoveryForm.class);
+        AgentDiscoveryRequest request = new AgentDiscoveryRequest();
+        request.setNamespaceId("team");
+        AgentDiscoveryResult discovery = new AgentDiscoveryResult();
+        when(form.toRequest()).thenReturn(request);
+        when(discoveryService.discover(request)).thenReturn(discovery);
+        
+        assertSame(discovery, controller.discover(form, "client", null).getData());
+        verify(lifecycleService).renewForQuery("client", "team");
+    }
+    
+    @ParameterizedTest
+    @NullAndEmptySource
+    @ValueSource(strings = {"watch-notify", "future-trigger"})
+    void testDiscoverPublishesTrace(String trigger) throws Exception {
+        AgentDiscoveryForm form = new AgentDiscoveryForm();
+        form.setAgentName("demo");
+        form.setLabel("latest");
+        AgentDiscoveryResult result = new AgentDiscoveryResult();
+        result.setVersion("2.0.0");
+        when(discoveryService.discover(any())).thenReturn(result);
+        try (MockedStatic<NotifyCenter> notifyCenter = mockStatic(NotifyCenter.class)) {
+            assertSame(result, controller.discover(form, "client", trigger).getData());
+            ArgumentCaptor<AiResourceTraceEvent> event =
+                ArgumentCaptor.forClass(AiResourceTraceEvent.class);
+            notifyCenter.verify(() -> NotifyCenter.publishEvent(event.capture()));
+            assertEquals("DISCOVER", event.getValue().getOperation());
+            assertEquals("demo", event.getValue().getResourceId());
+            assertEquals("2.0.0", event.getValue().getVersion());
+            assertEquals("SUCCESS", event.getValue().getStatus());
+            JsonNode ext =
+                JacksonUtils.toObj(event.getValue().getExt());
+            assertEquals("public", ext.get("namespaceId").asText());
+            assertEquals("HTTP", ext.get("protocol").asText());
+            assertEquals("client", ext.get("clientId").asText());
+            assertEquals("latest", ext.get("requestedLabel").asText());
+            assertEquals(AiConstants.Agent.DISCOVERY_TRIGGER_WATCH_NOTIFY.equals(trigger),
+                ext.get("subscriptionTriggered").asBoolean());
+        }
+    }
+    
+    @Test
+    void testDiscoverFailurePublishesTraceWithoutReplacingException() throws Exception {
+        AgentDiscoveryForm form = new AgentDiscoveryForm();
+        form.setAgentName("absent");
+        form.setVersion("1.0.0");
+        NacosApiException failure = new NacosApiException(NacosException.NOT_FOUND,
+            ErrorCode.RESOURCE_NOT_FOUND, "absent");
+        when(discoveryService.discover(any())).thenThrow(failure);
+        try (MockedStatic<NotifyCenter> notifyCenter = mockStatic(NotifyCenter.class)) {
+            assertSame(failure, assertThrows(NacosApiException.class,
+                () -> controller.discover(form, "client", "watch-notify")));
+            ArgumentCaptor<AiResourceTraceEvent> event =
+                ArgumentCaptor.forClass(AiResourceTraceEvent.class);
+            notifyCenter.verify(() -> NotifyCenter.publishEvent(event.capture()));
+            assertEquals("FAILURE", event.getValue().getStatus());
+            assertEquals("1.0.0", event.getValue().getVersion());
+            notifyCenter.when(() -> NotifyCenter.publishEvent(any(AiResourceTraceEvent.class)))
+                .thenThrow(new IllegalStateException("trace unavailable"));
+            assertSame(failure, assertThrows(NacosApiException.class,
+                () -> controller.discover(form, "client", "watch-notify")));
+        }
+    }
+    
+    @Test
+    void testRegisterEndpoints() throws Exception {
+        AgentEndpointRegistrationForm form = mock(AgentEndpointRegistrationForm.class);
+        AgentEndpointRegistrationBatch batch = new AgentEndpointRegistrationBatch();
+        ClientLivenessInfo liveness = new ClientLivenessInfo();
+        when(form.getNamespaceId()).thenReturn("team");
+        when(form.toRequest()).thenReturn(batch);
+        when(lifecycleService.register("client", "AI", "team", batch)).thenReturn(liveness);
+        
+        assertSame(liveness, controller.registerEndpoints(form, "client", "AI").getData());
+    }
+    
+    @Test
+    void testDeregisterEndpoints() throws Exception {
+        AgentEndpointDeregistrationForm form = mock(AgentEndpointDeregistrationForm.class);
+        when(form.getNamespaceId()).thenReturn("team");
+        when(form.getAgentName()).thenReturn("demo");
+        when(form.getProtocol()).thenReturn("a2a");
+        
+        assertNull(controller.deregisterEndpoints(form, "client", "AI").getData());
+        verify(form).validate();
+        verify(lifecycleService).deregister("client", "AI", "team", "demo", "a2a");
+    }
+    
+    @Test
+    void testHeartbeat() throws Exception {
+        ClientLivenessInfo liveness = new ClientLivenessInfo();
+        when(lifecycleService.heartbeat("client", "AI")).thenReturn(liveness);
+        
+        assertSame(liveness, controller.heartbeat("client", "AI").getData());
+    }
+    
+    @Test
+    void testWatch() throws Exception {
+        AgentWatchBatchForm form = mock(AgentWatchBatchForm.class);
+        AgentWatchBatchRequest request = new AgentWatchBatchRequest();
+        DeferredResult<Result<AgentWatchBatchResponse>> deferred = new DeferredResult<>();
+        when(form.toRequest()).thenReturn(request);
+        when(form.getWatchPayloadBytes()).thenReturn(17);
+        when(watchService.watch("client", "AI", request, 17)).thenReturn(deferred);
+        
+        assertSame(deferred, controller.watch(form, "client", "AI"));
+    }
+    
+    @Test
+    void testWatchSecurityMetadata() throws Exception {
+        Method method = AgentClientController.class.getMethod("watch", AgentWatchBatchForm.class,
+            String.class, String.class);
+        PostMapping mapping = method.getAnnotation(PostMapping.class);
+        Secured secured = method.getAnnotation(Secured.class);
+        assertEquals(ActionTypes.READ, secured.action());
+        assertEquals(SignType.AI, secured.signType());
+        assertEquals(ApiType.OPEN_API, secured.apiType());
+        org.junit.jupiter.api.Assertions.assertArrayEquals(new String[] {"/watch"},
+            mapping.value());
+    }
+}

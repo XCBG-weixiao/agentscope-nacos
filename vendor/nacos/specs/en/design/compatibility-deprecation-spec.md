@@ -1,0 +1,312 @@
+<!--
+  Copyright 1999-2026 Alibaba Group Holding Ltd.
+
+  Licensed under the Apache License, Version 2.0 (the "License");
+  you may not use this file except in compliance with the License.
+  You may obtain a copy of the License at
+
+       http://www.apache.org/licenses/LICENSE-2.0
+
+  Unless required by applicable law or agreed to in writing, software
+  distributed under the License is distributed on an "AS IS" BASIS,
+  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+  See the License for the specific language governing permissions and
+  limitations under the License.
+-->
+
+# Compatibility And Deprecation Spec
+
+This document defines the shared compatibility and deprecation rules for Nacos
+APIs, SDKs, storage fields, plugins, adapters, and experimental capabilities.
+It complements the [Nacos Design Spec](nacos-design-spec.md), the
+[Resource Model Spec](resource-model-spec.md), and the public interface specs.
+
+## 1. Scope
+
+This spec owns:
+
+- how a historical behavior is classified as canonical, compatibility-only,
+  deprecated, pending removal, experimental, or removed;
+- documentation requirements for deprecated or compatibility-only behavior;
+- migration expectations for APIs, SDK interfaces, storage fields, and plugin
+  extension points;
+- ability-gated fallback removal rules.
+
+It does not set a fixed release calendar. Each deprecation still needs domain
+maintainer review and release-note communication.
+
+## 2. Compatibility States
+
+| State | Meaning | New development rule |
+| --- | --- | --- |
+| Canonical | Current behavior defined by specs and intended for new use. | New code and docs should use it. |
+| Compatibility-only | Retained to avoid breaking existing users, but not the target model. | Do not extend it except for bug fixes and migration support. |
+| Deprecated | Still available, but users should migrate to a replacement. | Document replacement and migration guidance. |
+| Pending removal | Deprecated behavior whose removal conditions are known. | Keep only necessary compatibility tests and migration guidance. |
+| Experimental | Not yet promised as stable behavior. | Incompatible changes or removal may be allowed with clear notes. |
+| Removed | No longer supported by the current version. | Specs should describe only migration history when needed. |
+
+New specs must identify when a behavior is not canonical. Historical presence
+in code, database schema, configuration, or docs is not enough to make behavior
+canonical.
+
+## 3. Documentation Rules
+
+Deprecated or compatibility-only behavior must not be silently removed from
+documentation while the implementation still supports it. It should be
+documented in a compatibility or deprecation section that includes:
+
+- current state;
+- replacement API, field, SDK method, or plugin model;
+- migration guidance;
+- compatibility risks, including auth, visibility, or response-shape
+  differences;
+- removal conditions when known.
+
+User-facing main flows should describe canonical behavior first. Compatibility
+sections should be clearly secondary.
+
+## 4. API And SDK Rules
+
+Open APIs carry the strongest long-term compatibility expectations. Admin,
+Console, Maintainer SDK, and plugin-provided APIs may evolve faster, but
+incompatible changes still need migration guidance when users may rely on the
+documented behavior.
+
+Deprecated endpoints should remain in compatibility sections instead of being
+presented as primary APIs. New API definitions must not copy legacy shapes only
+because they already exist.
+
+SDKs should preserve binary compatibility for deprecated public methods when
+reasonable, especially in Java client/API/plugin modules. New SDK features
+should guide users to canonical interfaces and should not expand deprecated
+write or broad-query surfaces.
+
+## 5. Ability-Gated Fallback
+
+Ability negotiation is the preferred mixed-version mechanism. A fallback is
+allowed only when the owning domain spec documents:
+
+- the ability key or condition that gates canonical behavior;
+- the exact fallback behavior;
+- whether the fallback changes response shape, consistency, security, or
+  performance;
+- when the fallback can be removed.
+
+Fallback removal should wait until the minimum supported server/client matrix
+no longer needs the fallback, or until the community explicitly accepts the
+incompatibility.
+
+## 6. Storage And Schema Rules
+
+Storage fields retained only for compatibility must be documented as
+compatibility fields or pending-removal fields. They must not become new
+domain semantics unless a later domain spec explicitly promotes them.
+
+Schema cleanup should balance correctness with operational cost. A redundant
+field may remain temporarily to avoid frequent schema changes for users, but
+new specs, APIs, SDKs, and docs must not build new behavior on that field.
+
+## 7. Plugins And Adapters
+
+Plugin SPI compatibility belongs to the plugin spec that owns the SPI. A plugin
+may retain historical configuration keys or extension names as compatibility
+aliases, but canonical plugin lookup and enablement should be documented
+separately.
+
+Adapters that expose external community protocols are compatibility surfaces,
+not the canonical Nacos API model. They may intentionally follow external
+response shapes or route conventions, but must be documented as adapter
+behavior and should be opt-in when they introduce unauthenticated endpoints or
+additional ports.
+
+## 8. Current Known Compatibility Items
+
+The following items are current compatibility or deprecation examples:
+
+- v1/v2 HTTP APIs, which have been removed from the main server distribution
+  and migrated to the external
+  [nacos-api-legacy-adapter](https://github.com/nacos-group/nacos-api-legacy-adapter);
+- pre-spec v3 compatibility endpoints;
+- AI Prompt legacy endpoints and legacy Pipeline REST-style endpoints;
+- legacy MCP Console import endpoints, which are disabled by default and
+  scheduled for removal in Nacos 3.4.0 after migration to the unified AI
+  resource import endpoints;
+- historical MCP `mcpId` inputs and outputs, which remain compatibility
+  aliases while canonical management uses the Namespace-scoped `mcpName`;
+- legacy A2A AgentCard Java, gRPC, Admin, Maintainer, and Console facades;
+- Naming API-defined service selector fields and request parameters;
+- Config aggregation fields and related database columns;
+- historical plugin configuration keys;
+- OIDC browser endpoints that remain under historical paths;
+- Distributed Lock, which is experimental until promoted to stable.
+
+This list is not exhaustive. Each domain spec remains responsible for exact
+domain behavior and migration details.
+
+For the Nacos 3.3 line, Config default-namespace storage migration between
+legacy empty tenant values and `public`, and Config beta/tag old-table migration
+to `config_info_gray`, are treated as removed compatibility behavior. Operators
+that upgrade from versions before 3.0 must complete the affected data migration
+before upgrading when they used the default namespace or beta gray release.
+
+### 8.1 Client API Authentication Default In Nacos 3.3
+
+Nacos 3.3 changes Client API authentication from disabled by default to enabled
+by default. This is a default-value change, not an API deprecation or removal.
+The compatibility rules are:
+
+| Deployment state | Effective Client auth behavior |
+| --- | --- |
+| `nacos.core.auth.enabled=false` is explicitly present | Remains disabled. |
+| `nacos.core.auth.enabled=true` is explicitly present | Remains enabled. |
+| The property is absent | Uses the Nacos 3.3 default and is enabled. |
+| A new distribution configuration template is used | Enabled by the template. |
+| An older manually maintained file containing `false` is reused | Remains disabled. |
+| A Docker or Kubernetes auth environment value is absent | Uses the image/template default and is enabled. |
+| A Docker or Kubernetes auth environment value is explicit | The explicit `true` or `false` wins. |
+
+Operators upgrading applications that do not yet carry credentials should keep
+the Client switch explicitly disabled, distribute credentials, verify client
+login, and then enable the runtime-refreshable switch on every server member.
+Mixed effective values within one cluster are not a supported final rollout
+state. Release notes and upgrade documentation must call out the new default,
+the credential prerequisites, and the explicit-disable migration path.
+
+The existing switch is the compatibility mechanism. This change does not add a
+second legacy-auth switch, does not force-rewrite an existing configuration
+file, and does not change the independent Admin or Console auth defaults.
+
+## 9. Deprecated V3 API Gate
+
+A small set of deprecated v3 APIs pending removal is disabled by default:
+
+| Deprecated API | Canonical replacement |
+| --- | --- |
+| `GET /v3/admin/ai/pipelines` | `GET /v3/admin/ai/pipelines/list` |
+| `GET /v3/admin/ai/pipelines/{pipelineId}` | `GET /v3/admin/ai/pipelines/detail?pipelineId={pipelineId}` |
+| `GET /v3/console/ai/pipelines` | `GET /v3/console/ai/pipelines/list` |
+| `GET /v3/console/ai/pipelines/{pipelineId}` | `GET /v3/console/ai/pipelines/detail?pipelineId={pipelineId}` |
+| `POST /v3/console/ai/mcp/import/validate` | `POST /v3/console/ai/import/validate` |
+| `POST /v3/console/ai/mcp/import/execute` | `POST /v3/console/ai/import/execute` |
+
+Disabled endpoints return HTTP `410 Gone` with the `API_DEPRECATED` result code
+and identify their canonical replacement. Operators may temporarily reopen all
+of these endpoints during migration with:
+
+```properties
+nacos.core.api.compatibility.enabled=true
+```
+
+The switch is intentionally shared and applies only to APIs that explicitly use
+the v3 compatibility gate. It does not replace the audience-specific switches
+owned by `nacos-api-legacy-adapter`. Authentication and authorization still
+apply to reopened endpoints.
+
+The former `nacos.ai.resource.import.legacy-mcp-api-enabled` property is no
+longer recognized. Legacy MCP direct URL import additionally requires
+`nacos.ai.resource.import.allow-user-url=true`; operators should prefer managed
+source configuration instead.
+
+## 10. Legacy HTTP API Adapter
+
+Starting with the Nacos 3.2.0 line, legacy v1 and v2 HTTP APIs are no longer
+part of the default Nacos server distribution. They are a separate compatibility
+surface provided by
+[nacos-api-legacy-adapter](https://github.com/nacos-group/nacos-api-legacy-adapter).
+
+Rules:
+
+- v3 HTTP APIs and current SDKs are the canonical migration target.
+- The legacy adapter is a temporary migration aid, not a renewed API contract.
+- The adapter must be installed explicitly, such as by placing its jar in the
+  Nacos `plugins` directory or adding it as a dependency for embedded/custom
+  applications.
+- The adapter version must match the target Nacos server version.
+- The adapter is not guaranteed to be supported by future Nacos versions and is
+  not the place to define new v1/v2 behavior.
+
+Domain specs should mention legacy v1/v2 behavior only as migration context or
+when a current compatibility path depends on it.
+
+## 11. Legacy A2A Agent Facades
+
+The canonical Agent model uses `type=agent`, protocol-neutral versions, and RAD
+discovery. Historical A2A AgentCard surfaces are compatibility-only and are
+adapted at the server boundary according to the
+[A2A Agent Spec](../ai/a2a-agent-spec.md).
+
+Compatibility windows are intentionally different by audience:
+
+- Java `A2aService` and legacy A2A gRPC payloads have no removal version yet;
+- Admin `/v3/admin/ai/a2a` and `A2aMaintainerService` remain supported through
+  the 4.0.x compatibility window;
+- Console `/v3/console/ai/a2a` remains supported through the 3.4.x
+  compatibility window and may be removed after the bundled UI migrates.
+
+No new capability may be added only to these facades. New development targets
+the Agent Management and RAD contracts. Historical data and mixed-server
+rolling upgrade follow the
+[Historical A2A Upgrade Migration Spec](../ai/a2a-upgrade-migration-spec.md)
+and do not extend the API window by themselves. Its reconciliation state,
+control objects, migration source guards, transition Runtime dual
+materialization, optional historical Naming shadow, and migration-only
+configuration support Nacos 3.0-3.2 upgrades and are pending removal in Nacos
+4.0. Canonical Agent/RAD facts and any public A2A facade still inside its own
+compatibility window remain after that temporary implementation is removed.
+
+## 12. Legacy MCP Identifiers
+
+Canonical MCP management identifies a Resource by
+`namespaceId + type=mcp + mcpName`. The UUID-shaped `mcpId` is deprecated as
+a public resource identifier but remains an internal physical-storage alias and
+a legacy wire field.
+
+Compatibility differs by field:
+
+| Surface | Status | Rule |
+| --- | --- | --- |
+| New Admin, Console, and Maintainer lifecycle APIs | Canonical | Accept `mcpName` and optional Version; do not add `mcpId`. |
+| Existing Admin, Console, and Maintainer ID-only inputs | Deprecated compatibility | Resolve exactly one `AiResource.ext.mcpId` in the requested Namespace, then authorize and operate by canonical name. |
+| Existing model, event, create/release response, and nested `McpServerBasicInfo.id` fields | Active compatibility | Preserve wire shape and value while physical Config coordinates and current consumers require them. |
+| Top-level `AbstractMcpRequest.mcpId` in MCP gRPC requests | Ignored and deprecated | Preserve its field number, do not implement ID lookup, and retain each handler's current name requirements. |
+
+Legacy ID lookup must not use eventually consistent Search, historical
+Manifest/Config identity lookup, or an MCP-specific in-memory index. No new
+table or column is introduced for this deprecated path. Removal requires a
+separate migration for Config coordinates, direct consumers, SDK models, and
+wire responses; no removal version is defined by the first lifecycle-hosting
+migration. Exact behavior belongs to the
+[MCP Server Spec](../ai/mcp-server-spec.md).
+
+### 12.1 Legacy MCP Maintainer Methods
+
+The legacy `McpMaintainerService` detail and direct-online create/update
+methods are deprecated since Nacos 3.3.0 and planned for removal in Nacos
+4.0.0. Their runtime behavior remains compatible during this window. Callers
+should migrate as follows:
+
+| Deprecated operation | Canonical replacement |
+| --- | --- |
+| Serving-projection detail | Select an exact Version with `listMcpServerVersions`, then use `getMcpServerVersion`. |
+| Local, remote, or generic direct-online create | Use `createMcpServer(McpServerDraftRequest)`, then `submitMcpServerVersion`; when review applies, explicitly use `publishMcpServerVersion` after approval. |
+| Direct-online update | Use `createMcpServer(McpServerDraftRequest)` for a new Version or `updateMcpServer(McpServerDraftRequest)` for an existing draft, then submit and, when required, publish it. |
+
+Legacy cross-resource list/search and published-Version or full-Resource
+delete methods are not deprecated by this decision because the typed lifecycle
+surface does not yet provide semantics-equivalent replacements. They require a
+separate API design and deprecation review before any removal version is set.
+
+## 13. Related Specs
+
+- [HTTP API Spec](../http-api/api-spec.md)
+- [V3 API Surface](../http-api/v3-api-surface.md)
+- [SDK Spec](../sdk/sdk-spec.md)
+- [Client Ability Negotiation Spec](../client/client-ability-negotiation-spec.md)
+- [Resource Model Spec](resource-model-spec.md)
+- [Persistence And Dump Spec](foundation-persistence-dump-spec.md)
+- [Integration And Adapter Spec](../integration/integration-adapter-spec.md)
+- [Plugin Specs](../plugin/README.md)
+- [Agent Management Spec](../ai/agent-management-spec.md)
+- [RAD Protocol Spec](../ai/rad-protocol-spec.md)
+- [MCP Server Spec](../ai/mcp-server-spec.md)

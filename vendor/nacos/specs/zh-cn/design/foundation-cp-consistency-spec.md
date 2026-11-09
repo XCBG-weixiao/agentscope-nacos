@@ -1,0 +1,238 @@
+<!--
+  Copyright 1999-2026 Alibaba Group Holding Ltd.
+
+  Licensed under the Apache License, Version 2.0 (the "License");
+  you may not use this file except in compliance with the License.
+  You may obtain a copy of the License at
+
+       http://www.apache.org/licenses/LICENSE-2.0
+
+  Unless required by applicable law or agreed to in writing, software
+  distributed under the License is distributed on an "AS IS" BASIS,
+  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+  See the License for the specific language governing permissions and
+  limitations under the License.
+-->
+
+# Nacos CP 一致性规范
+
+本文定义 Nacos 使用的 CP 向一致性基础能力。它是
+[基础能力规范](foundation-capabilities-spec.md)中 CP 一致性部分的展开。
+
+## 1. 定位
+
+AP 和 CP 是 CAP 理论中的一致性选择。在 Nacos 中，CP 路径在分区容忍前提下优先保证强顺序提交
+状态。当 quorum、leader 或协议 group 不可用时，CP 操作可以失败或暂时不可用，而不是接受分叉写入。
+
+当前内置 CP 实现是通过 `JRaftProtocol` 接入的 JRaft。Nacos 可以通过 SPI 加载 `CPProtocol`
+实现，但仓库内支持的 CP 语义由 Raft/JRaft 定义。
+
+## 2. CP 资源规则
+
+CP 状态适用于具备以下特征的资源：
+
+- 由管理面或服务端控制路径拥有的持久状态；
+- 需要在客户端消失和服务端重启后继续存在；
+- 代表运维人员或开发人员意图，并需要覆盖运行时注册；
+- 在一个逻辑 group 内要求单一提交顺序；
+- 可以从 snapshot 和已提交日志恢复。
+
+如果高频可丢弃运行时状态只需要 AP 最终收敛，不应使用 CP。这类资源应使用
+[AP 一致性规范](foundation-ap-consistency-spec.md)。
+
+CP 使用方必须定义：
+
+- Raft group name 和归属；
+- write request 形态和 operation 值；
+- read request 形态和读取可见性；
+- 确定性的 `onApply` 行为；
+- snapshot 保存/加载形态和兼容性；
+- 用户可见操作对 leader 或 readiness 的要求；
+- group 无 leader、无 processor 或无 quorum 时的错误行为。
+
+## 3. 协议模型
+
+共享一致性接口是 `ConsistencyProtocol`。CP 通过 `CPProtocol` 对其进行特化。
+
+CP 模型如下：
+
+```text
+ProtocolManager
+  -> CPProtocol(JRaftProtocol)
+  -> RequestProcessor4CP per group
+  -> JRaftServer multi-raft group
+  -> NacosStateMachine
+  -> processor.onApply / processor.onRequest
+  -> snapshot operations
+```
+
+`ProtocolManager` 以 `ip:raftPort` 形式注入 CP member。Member 变化事件会异步传播给 CP 协议。
+
+## 4. Request Processor 契约
+
+每个 CP 领域通过注册 `RequestProcessor4CP` 接入。
+
+Processor 规则：
+
+- `group()` 必须返回稳定且唯一的 group name；
+- 一个 group 在同一个 server runtime 中应只有一个权威 processor；
+- `onApply(WriteRequest)` 必须是确定性的，不得依赖慢速远端 IO；
+- `onRequest(ReadRequest)` 必须按照该 group 的读规则返回响应；
+- group 需要 snapshot 恢复时，`loadSnapshotOperate()` 必须声明 snapshot operation；
+- processor 必须将未知 operation 作为显式失败处理；
+- processor 只能在 committed apply 更新本地状态之后，按
+  [事件分发与 NotifyCenter 规范](foundation-event-dispatch-spec.md)发布领域事件。
+
+Processor 拥有领域语义。CP 基础层拥有 group 路由、leader 转发、日志提交、read-index 处理、
+metadata 和 snapshot 集成。
+
+## 5. JRaft 运行时规则
+
+JRaft 是当前使用的多 group CP 运行时。
+
+规则：
+
+- 每个 `RequestProcessor4CP` 创建一个 Raft group；
+- 写请求提交到 group leader，或被转发到当前 leader；
+- 已提交日志通过 `NacosStateMachine` apply；
+- follower replay 会 apply 已提交写入，但会忽略没有 closure 的 follower-local read entry；
+- 读路径优先尝试 Raft read-index，失败时可以回退到 leader read；
+- `protocolMetaData()` 记录 leader、term、group members 和错误；
+- `isReady()` 表示协议已启动；strict mode 下还要求 group 已存在 leader；
+- member 移除通过 Raft peer-change command 处理；新增节点启动时会将自身注册到集群。
+
+实现中的超时是运维默认值，不是公开 API 保证。除非领域 API 明确声明，领域规范不得把 JRaft
+超时值暴露为用户可见正确性契约。
+
+### Raft 日志请求编码
+
+Raft task data 使用两字节请求类型前缀，后接序列化的 Protobuf 请求。首字节为 `0x38`
+（field 7，varint），次字节 `1` 表示 `ReadRequest`，`2` 表示 `WriteRequest`。
+Follower apply 和日志恢复必须通过该前缀区分读写。前缀缺失或截断、未知请求类型及损坏的
+Protobuf 数据必须以 `ConsistencyException` 失败；未知类型不得当作写请求执行。
+Protobuf 解析失败必须保留异常原因，debug 诊断不得包含请求 payload。
+
+Nacos 3.3 移除无类型前缀的 `GetRequest` / `Log` 回退解析及转换辅助方法，继续支持
+Nacos 2.1.0 引入的带类型前缀格式。这是内部 Raft 日志契约，不属于公开 Java SDK 或
+HTTP API 变更。
+
+已有数据目录即使经历过中间版本升级，也可能保留旧版本（包括 Nacos 2.0.x）产生的无前缀
+日志。升级到移除回退解析的版本前，运维侧必须在能读取这些日志的版本中完成恢复及
+snapshot/log 迁移。仅升级运行版本不会转换已持久化日志。无前缀日志不再支持直接回放，
+必须显式失败。
+
+### JRaft 传输鉴权
+
+Nacos 使用 JRaft gRPC transport，不依赖可选的 Bolt transport 或 SOFA Hessian。
+Nacos RPC factory 必须在该依赖集合下正常创建 client 和 server，并共享注册的 Protobuf parser
+与响应 marshaller。Server 创建保留 JRaft 1.4.1 的 endpoint 绑定规则：endpoint IP 非空白时
+绑定指定地址，空白时绑定通配地址。现有 `jraft.grpc.max_inbound_message_size.bytes` 配置和
+configuration helper 必须在 server 启动前继续生效。
+
+JRaft 原生 gRPC 是服务端间 inner transport。新版本 JRaft client 始终通过 gRPC
+`CallCredentials` 携带配置的 Nacos server identity，服务端始终在分发给 JRaft processor 前通过
+`ServerInterceptor` 校验。
+
+滚动升级使用临时两态迁移：
+
+```text
+COMPATIBLE -> ENFORCED
+```
+
+`COMPATIBLE` 状态下，缺失或错误 credential 会被限频记录，但请求继续执行，因为旧 member 无法携带
+credential。每个新 member 发布临时能力 `supportJraftAuth=true`。完整 member 视图中的所有 member
+都上报该能力后，本机自动且不可逆地进入 `ENFORCED`。在 `ENFORCED` 中，缺失或错误 credential
+会在 processor 执行前以 gRPC `UNAUTHENTICATED` 拒绝。
+
+状态迁移是单向的。Member 新增、删除或元数据更新不得使已强制的进程回到兼容状态。运行态必须先锁存
+强制鉴权，再写入 `{nacos.home}/data/jraft-auth-enforced.state`；状态文件写入失败不得延迟强制鉴权，
+后续定时检查必须持续重试。服务端重启发现该文件时必须立即强制鉴权。状态文件不包含 server identity
+或 member 数据，也不是运维回退开关。
+
+能力发现、兼容放行、状态迁移和状态文件处理必须由一个独立兼容组件拥有。该组件从引入时即标记废弃，
+Javadoc 明确在 Nacos 4.0.0 删除，并且不得拥有永久 credential 解析或校验逻辑。Nacos 4.0.0 删除该
+组件后始终强制 JRaft server identity。
+
+进入强制状态后，向不携带 JRaft credential 的旧版本做混合滚动降级不保证无损或可用。旧 client
+不能调用已强制的新 server，leader 所在位置和 group quorum 分布可能导致选主、复制、ReadIndex、
+leader 转发、snapshot 和 CLI 操作失败。
+
+## 6. 当前 CP 使用方
+
+| Group | 归属 | 用途 |
+| --- | --- | --- |
+| `nacos_config` | Persistence 与 Config 内置存储 | 复制内置存储操作，并使 Config dump 等待可读的 committed state。 |
+| `naming_persistent_service_v2` | Naming | 复制持久实例注册、更新和注销操作。 |
+| `naming_service_metadata` | Naming | 复制 service metadata 和 cluster metadata。 |
+| `naming_instance_metadata` | Naming | 复制运维态 instance metadata。 |
+| `naming_persistent_service` | Naming 运维 | 复制遗留 naming switch/domain 状态。 |
+| `plugin_state` | Core plugin | 选择内置 Raft synchronizer 时，复制插件状态和运行时配置变化。 |
+
+新的 CP 使用方必须把 group 加入相关领域规范，并定义该 group 提交的资源语义。
+
+## 7. 读写语义
+
+写规则：
+
+- write request 必须包含 group、operation 和序列化数据；
+- 成功表示写入已按该 group processor 契约被接受并 apply；
+- 失败必须向调用方暴露，不能静默重试后仍作为用户可见成功返回；
+- 当调用层可能重复提交时，领域 apply 逻辑必须幂等或受保护；
+- 写入不得在 committed apply 前发布事件。
+
+Core 插件领域把 `plugin_state` 作为内置 Raft synchronizer 的可选运行时资源，而不是
+Spring context 构造的前置条件。standalone 模式以及显式选择自定义
+`PluginStateSynchronizerProvider` 的集群都不注册该 group。processor 不得在 bean
+构造器中初始化 CP 或注册 group。Core 接受本地插件状态和配置后，再异步初始化默认
+Raft synchronizer 和 group。CP 初始化或 group 注册失败时应记录日志并将集群插件写能力
+标记为不可用，但不得导致 Nacos 启动失败。依赖该 group 的调用在其不可用期间必须返回
+明确的服务端错误，不得静默按 standalone 写入或切换到其他 synchronizer。
+
+读规则：
+
+- read request 必须包含目标 group 和序列化查询数据；
+- group processor 定义是否支持读取以及读取哪类状态；
+- read-index 失败时可以回退到 leader read；
+- 如果领域绕过 CP 从本地 cache 读取，必须在领域规范中记录 stale-read 容忍度。
+
+## 8. Snapshot 与恢复
+
+Snapshot 规则：
+
+- 具有可恢复状态的 group 应提供 `SnapshotOperation`；
+- snapshot 格式和兼容性由领域 processor 拥有；
+- snapshot save/load 必须保留重启后重建服务状态所需的数据；
+- snapshot 恢复使用的归档条目必须解析在 snapshot reader 目标目录内；创建目录或写入文件前，
+  必须拒绝绝对路径、目录控制路径和逃逸路径；
+- snapshot 归档必须输出 `/` 分隔符；恢复时执行绝对路径、目录控制路径和边界检查，应把 `/` 和
+  `\\` 都视为条目分隔符；
+- 没有 snapshot operation 的 group 依赖日志 replay 或独立持久化；
+- 领域规范必须定义 snapshot 恢复如何与本地 cache 和派生索引交互。
+
+对于 Config 内置存储，启动阶段会等待 CP metadata 表明数据可读后继续 dump 恢复。这是建立在
+CP 基础能力和[持久化与 Dump 规范](foundation-persistence-dump-spec.md)上的 Config 持久化规则。
+
+## 9. 边界规则
+
+- CP 一致性是在 group 内的强顺序提交，不保证每个接口都通过 CP 读取。
+- CP group 拥有 committed 领域状态，不拥有传输重试、SDK redo 或 AP 运行时状态。
+- 除非领域规范明确要求 CP 语义，不应使用 JRaft group 串行化高频临时状态。
+- CP processor 不得重新定义公开 API 字段、资源身份或鉴权规则。
+- CP metadata 是运维协议状态。它可以通过授权的 ops API 暴露，但不是领域资源身份。
+- 替换 CP 实现时，必须保持本文定义的 `CPProtocol`、`RequestProcessor4CP`、group、snapshot、
+  metadata 和错误语义。
+- 只有领域规范已经定义本地读取视图和明确的写入不可用语义时，才允许把可选领域的 group
+  注册失败与服务端启动隔离。该例外不降低内置 Config 存储等关键 CP 领域的 readiness
+  要求。
+
+## 10. 相关规范
+
+- [基础能力规范](foundation-capabilities-spec.md)
+- [AP 一致性规范](foundation-ap-consistency-spec.md)
+- [持久化与 Dump 规范](foundation-persistence-dump-spec.md)
+- [事件分发与 NotifyCenter 规范](foundation-event-dispatch-spec.md)
+- [集群成员规范](foundation-cluster-membership-spec.md)
+- [Config 规范](../config/config-spec.md)
+- [Config 持久化、Dump 与历史规范](../config/config-persistence-history-spec.md)
+- [Naming 一致性与客户端状态规范](../naming/naming-consistency-client-spec.md)
+- [鉴权与权限规范](../auth/auth-permission-spec.md)

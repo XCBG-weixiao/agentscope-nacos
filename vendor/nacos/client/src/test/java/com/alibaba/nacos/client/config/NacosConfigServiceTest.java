@@ -1,0 +1,1047 @@
+/*
+ *   Copyright 1999-2018 Alibaba Group Holding Ltd.
+ *
+ *   Licensed under the Apache License, Version 2.0 (the "License");
+ *   you may not use this file except in compliance with the License.
+ *   You may obtain a copy of the License at
+ *
+ *        http://www.apache.org/licenses/LICENSE-2.0
+ *
+ *   Unless required by applicable law or agreed to in writing, software
+ *   distributed under the License is distributed on an "AS IS" BASIS,
+ *   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ *   See the License for the specific language governing permissions and
+ *   limitations under the License.
+ */
+
+package com.alibaba.nacos.client.config;
+
+import com.alibaba.nacos.api.PropertyKeyConst;
+import com.alibaba.nacos.api.config.ConfigType;
+import com.alibaba.nacos.api.config.GetConfigRequest;
+import com.alibaba.nacos.api.config.PublishConfigRequest;
+import com.alibaba.nacos.api.config.PublishConfigResult;
+import com.alibaba.nacos.api.config.RemoveConfigRequest;
+import com.alibaba.nacos.api.config.RemoveConfigResult;
+import com.alibaba.nacos.api.config.listener.ConfigFuzzyWatchChangeEvent;
+import com.alibaba.nacos.api.config.listener.FuzzyWatchEventWatcher;
+import com.alibaba.nacos.api.config.listener.Listener;
+import com.alibaba.nacos.api.exception.NacosException;
+import com.alibaba.nacos.client.config.filter.impl.ConfigResponse;
+import com.alibaba.nacos.client.config.impl.ClientWorker;
+import com.alibaba.nacos.client.config.impl.ConfigFuzzyWatchContext;
+import com.alibaba.nacos.client.config.impl.ConfigServerListManager;
+import com.alibaba.nacos.client.config.impl.ConfigTransportClient;
+import com.alibaba.nacos.client.config.impl.LocalConfigInfoProcessor;
+import com.alibaba.nacos.client.config.impl.LocalEncryptedDataKeyProcessor;
+import com.alibaba.nacos.client.env.NacosClientProperties;
+import com.alibaba.nacos.common.utils.FuzzyGroupKeyPattern;
+import com.alibaba.nacos.common.utils.MD5Utils;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.ArgumentCaptor;
+import org.mockito.MockedStatic;
+import org.mockito.Mockito;
+import org.mockito.junit.jupiter.MockitoExtension;
+import org.mockito.junit.jupiter.MockitoSettings;
+import org.mockito.quality.Strictness;
+
+import java.lang.reflect.Field;
+import java.lang.reflect.Method;
+import java.util.Arrays;
+import java.util.Collections;
+import java.util.Properties;
+import java.util.Set;
+import java.util.concurrent.Executor;
+import java.util.concurrent.Future;
+
+import static com.alibaba.nacos.api.common.Constants.ALL_PATTERN;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
+
+@ExtendWith(MockitoExtension.class)
+@MockitoSettings(strictness = Strictness.LENIENT)
+class NacosConfigServiceTest {
+    
+    private NacosConfigService nacosConfigService;
+    
+    private ClientWorker mockWoker;
+    
+    private void setFinal(Field field, Object ins, Object newValue) throws Exception {
+        field.setAccessible(true);
+        field.set(ins, newValue);
+        field.setAccessible(false);
+        
+    }
+    
+    @BeforeEach
+    void mock() throws Exception {
+        final Properties properties = new Properties();
+        properties.put("serverAddr", "1.1.1.1");
+        nacosConfigService = new NacosConfigService(properties);
+        mockWoker = Mockito.mock(ClientWorker.class);
+        setFinal(NacosConfigService.class.getDeclaredField("worker"), nacosConfigService,
+            mockWoker);
+    }
+    
+    @AfterEach
+    void clean() {
+        LocalConfigInfoProcessor.cleanAllSnapshot();
+    }
+    
+    @Test
+    void testGetConfigFromServer() throws NacosException {
+        final String dataId = "1";
+        final String group = "2";
+        final String tenant = "public";
+        final int timeout = 3000;
+        ConfigResponse response = new ConfigResponse();
+        response.setContent("aa");
+        response.setConfigType("bb");
+        Mockito
+            .when(mockWoker.getServerConfig(eq(dataId), eq(group), eq(tenant), eq((long) timeout),
+                eq(false), Mockito.isNull()))
+            .thenReturn(response);
+        Mockito
+            .when(mockWoker.getServerConfig(eq(dataId), eq(group), eq(tenant), eq((long) timeout),
+                eq(false), Mockito.isNull(), any(ClientWorker.LocalConfigContent.class)))
+            .thenReturn(response);
+        Mockito
+            .when(mockWoker.getServerConfig(eq(dataId), eq(group), eq(tenant), eq((long) timeout),
+                eq(false)))
+            .thenReturn(response);
+        final String config = nacosConfigService.getConfig(dataId, group, timeout);
+        assertEquals("aa", config);
+        Mockito.verify(mockWoker, Mockito.times(1)).getServerConfig(eq(dataId), eq(group),
+            eq(tenant), eq((long) timeout),
+            eq(false), Mockito.isNull(), any(ClientWorker.LocalConfigContent.class));
+        
+    }
+    
+    @Test
+    void testGetConfigFromFailOver() throws NacosException {
+        final String dataId = "1failover";
+        final String group = "2";
+        final String tenant = "public";
+        
+        MockedStatic<LocalConfigInfoProcessor> localConfigInfoProcessorMockedStatic =
+            Mockito.mockStatic(
+                LocalConfigInfoProcessor.class);
+        try {
+            String contentFailOver = "failOverContent" + System.currentTimeMillis();
+            localConfigInfoProcessorMockedStatic.when(
+                () -> LocalConfigInfoProcessor.getFailover(any(), eq(dataId), eq(group),
+                    eq(tenant)))
+                .thenReturn(contentFailOver);
+            final int timeout = 3000;
+            
+            final String config = nacosConfigService.getConfig(dataId, group, timeout);
+            assertEquals(contentFailOver, config);
+        } finally {
+            localConfigInfoProcessorMockedStatic.close();
+        }
+    }
+    
+    @Test
+    void testGetConfigFromLocalCache() throws NacosException {
+        final String dataId = "1localcache";
+        final String group = "2";
+        final String tenant = "public";
+        
+        MockedStatic<LocalConfigInfoProcessor> localConfigInfoProcessorMockedStatic =
+            Mockito.mockStatic(
+                LocalConfigInfoProcessor.class);
+        try {
+            String contentFailOver = "localCacheContent" + System.currentTimeMillis();
+            //fail over null
+            localConfigInfoProcessorMockedStatic.when(
+                () -> LocalConfigInfoProcessor.getFailover(any(), eq(dataId), eq(group),
+                    eq(tenant)))
+                .thenReturn(null);
+            //snapshot content
+            localConfigInfoProcessorMockedStatic.when(
+                () -> LocalConfigInfoProcessor.getSnapshot(any(), eq(dataId), eq(group),
+                    eq(tenant)))
+                .thenReturn(contentFailOver);
+            //form server error.
+            final int timeout = 3000;
+            Mockito.when(
+                mockWoker.getServerConfig(eq(dataId), eq(group), eq(tenant), eq((long) timeout),
+                    eq(false), Mockito.isNull()))
+                .thenThrow(new NacosException());
+            Mockito
+                .when(
+                    mockWoker.getServerConfig(eq(dataId), eq(group), eq(tenant), eq((long) timeout),
+                        eq(false), anyString(), any(ClientWorker.LocalConfigContent.class)))
+                .thenThrow(new NacosException());
+            Mockito.when(
+                mockWoker.getServerConfig(eq(dataId), eq(group), eq(tenant), eq((long) timeout),
+                    eq(false)))
+                .thenThrow(new NacosException());
+            
+            final String config = nacosConfigService.getConfig(dataId, group, timeout);
+            assertEquals(contentFailOver, config);
+        } finally {
+            localConfigInfoProcessorMockedStatic.close();
+        }
+        
+    }
+    
+    @Test
+    void testGetConfig403() throws NacosException {
+        final String dataId = "1localcache403";
+        final String group = "2";
+        final String tenant = "public";
+        
+        MockedStatic<LocalConfigInfoProcessor> localConfigInfoProcessorMockedStatic =
+            Mockito.mockStatic(
+                LocalConfigInfoProcessor.class);
+        try {
+            //fail over null
+            localConfigInfoProcessorMockedStatic.when(
+                () -> LocalConfigInfoProcessor.getFailover(any(), eq(dataId), eq(group),
+                    eq(tenant)))
+                .thenReturn(null);
+            
+            //form server error.
+            final int timeout = 3000;
+            Mockito.when(
+                mockWoker.getServerConfig(eq(dataId), eq(group), eq(tenant), eq((long) timeout),
+                    eq(false), Mockito.isNull()))
+                .thenThrow(
+                    new NacosException(NacosException.NO_RIGHT, "no right"));
+            Mockito
+                .when(
+                    mockWoker.getServerConfig(eq(dataId), eq(group), eq(tenant), eq((long) timeout),
+                        eq(false), Mockito.isNull(), any(ClientWorker.LocalConfigContent.class)))
+                .thenThrow(new NacosException(NacosException.NO_RIGHT, "no right"));
+            Mockito
+                .when(
+                    mockWoker.getServerConfig(eq(dataId), eq(group), eq(tenant), eq((long) timeout),
+                        eq(false)))
+                .thenThrow(new NacosException(NacosException.NO_RIGHT, "no right"));
+            try {
+                nacosConfigService.getConfig(dataId, group, timeout);
+                assertTrue(false);
+            } catch (NacosException e) {
+                assertEquals(NacosException.NO_RIGHT, e.getErrCode());
+            }
+        } finally {
+            localConfigInfoProcessorMockedStatic.close();
+        }
+    }
+    
+    @Test
+    void testGetConfigAndSignListener() throws NacosException {
+        final String dataId = "1";
+        final String group = "2";
+        final String tenant = "";
+        final String content = "123";
+        final int timeout = 3000;
+        final Listener listener = new Listener() {
+            
+            @Override
+            public Executor getExecutor() {
+                return null;
+            }
+            
+            @Override
+            public void receiveConfigInfo(String configInfo) {
+                
+            }
+        };
+        
+        Properties properties = new Properties();
+        properties.put(PropertyKeyConst.SERVER_ADDR, "aaa");
+        final NacosClientProperties nacosProperties =
+            NacosClientProperties.PROTOTYPE.derive(properties);
+        ConfigServerListManager mgr = new ConfigServerListManager(nacosProperties);
+        mgr.start();
+        ConfigTransportClient client = new ConfigTransportClient(nacosProperties, mgr) {
+            
+            @Override
+            public void startInternal() throws NacosException {
+                // NOOP
+            }
+            
+            @Override
+            public String getName() {
+                return "TestConfigTransportClient";
+            }
+            
+            @Override
+            public void notifyListenConfig() {
+                // NOOP
+            }
+            
+            @Override
+            public void executeConfigListen() {
+                // NOOP
+            }
+            
+            @Override
+            public void removeCache(String dataId, String group) {
+                // NOOP
+            }
+            
+            @Override
+            public ConfigResponse queryConfig(String dataId, String group, String tenant,
+                long readTimeous,
+                boolean notify) throws NacosException {
+                ConfigResponse configResponse = new ConfigResponse();
+                configResponse.setContent(content);
+                configResponse.setDataId(dataId);
+                configResponse.setGroup(group);
+                configResponse.setTenant(tenant);
+                return configResponse;
+            }
+            
+            @Override
+            public boolean publishConfig(String dataId, String group, String tenant, String appName,
+                String tag,
+                String betaIps, String content, String encryptedDataKey, String casMd5,
+                String type)
+                throws NacosException {
+                return false;
+            }
+            
+            @Override
+            public boolean removeConfig(String dataId, String group, String tenant, String tag)
+                throws NacosException {
+                return false;
+            }
+        };
+        Mockito.when(mockWoker.getAgent()).thenReturn(client);
+        
+        final String config =
+            nacosConfigService.getConfigAndSignListener(dataId, group, timeout, listener);
+        assertEquals(content, config);
+        
+        Mockito.verify(mockWoker, Mockito.times(1))
+            .addTenantListenersWithContent(dataId, group, content, null,
+                Collections.singletonList(listener));
+        assertEquals(content, config);
+        
+        Mockito.verify(mockWoker, Mockito.times(1))
+            .addTenantListenersWithContent(dataId, group, content, null,
+                Arrays.asList(listener));
+    }
+    
+    @Test
+    void testAddListener() throws NacosException {
+        String dataId = "1";
+        String group = "2";
+        Listener listener = new Listener() {
+            
+            @Override
+            public Executor getExecutor() {
+                return null;
+            }
+            
+            @Override
+            public void receiveConfigInfo(String configInfo) {
+                
+            }
+        };
+        
+        nacosConfigService.addListener(dataId, group, listener);
+        Mockito.verify(mockWoker, Mockito.times(1)).addTenantListeners(dataId, group,
+            Arrays.asList(listener));
+    }
+    
+    @Test
+    void testPublishConfig() throws NacosException {
+        String dataId = "1";
+        String group = "2";
+        String content = "123";
+        String namespace = "public";
+        String type = ConfigType.getDefaultType().getType();
+        com.alibaba.nacos.api.config.remote.response.ConfigPublishResponse publishResponse =
+            com.alibaba.nacos.api.config.remote.response.ConfigPublishResponse
+                .buildSuccessResponse();
+        Mockito.when(mockWoker.publishConfigWithResponse(eq(dataId), eq(group), eq(namespace),
+            Mockito.isNull(), Mockito.isNull(), Mockito.isNull(), eq(content), eq(""),
+            Mockito.isNull(), eq(type))).thenReturn(publishResponse);
+        
+        final boolean b = nacosConfigService.publishConfig(dataId, group, content);
+        assertTrue(b);
+        
+        Mockito.verify(mockWoker, Mockito.times(1))
+            .publishConfigWithResponse(eq(dataId), eq(group), eq(namespace),
+                Mockito.isNull(), Mockito.isNull(), Mockito.isNull(), eq(content), eq(""),
+                Mockito.isNull(), eq(type));
+    }
+    
+    @Test
+    void testPublishConfig2() throws NacosException {
+        String dataId = "1";
+        String group = "2";
+        String content = "123";
+        String namespace = "public";
+        String type = ConfigType.PROPERTIES.getType();
+        com.alibaba.nacos.api.config.remote.response.ConfigPublishResponse publishResponse =
+            com.alibaba.nacos.api.config.remote.response.ConfigPublishResponse
+                .buildSuccessResponse();
+        Mockito.when(mockWoker.publishConfigWithResponse(eq(dataId), eq(group), eq(namespace),
+            Mockito.isNull(), Mockito.isNull(), Mockito.isNull(), eq(content), eq(""),
+            Mockito.isNull(), eq(type))).thenReturn(publishResponse);
+        
+        final boolean b = nacosConfigService.publishConfig(dataId, group, content, type);
+        assertTrue(b);
+        
+        Mockito.verify(mockWoker, Mockito.times(1))
+            .publishConfigWithResponse(eq(dataId), eq(group), eq(namespace),
+                Mockito.isNull(), Mockito.isNull(), Mockito.isNull(), eq(content), eq(""),
+                Mockito.isNull(), eq(type));
+    }
+    
+    @Test
+    void testPublishConfigCas() throws NacosException {
+        String dataId = "1";
+        String group = "2";
+        String content = "123";
+        String namespace = "public";
+        String casMd5 = "96147704e3cb8be8597d55d75d244a02";
+        String type = ConfigType.getDefaultType().getType();
+        com.alibaba.nacos.api.config.remote.response.ConfigPublishResponse publishResponse =
+            com.alibaba.nacos.api.config.remote.response.ConfigPublishResponse
+                .buildSuccessResponse();
+        Mockito.when(mockWoker.publishConfigWithResponse(eq(dataId), eq(group), eq(namespace),
+            Mockito.isNull(), Mockito.isNull(), Mockito.isNull(), eq(content), eq(""),
+            eq(casMd5), eq(type))).thenReturn(publishResponse);
+        
+        final boolean b = nacosConfigService.publishConfigCas(dataId, group, content, casMd5);
+        assertTrue(b);
+        
+        Mockito.verify(mockWoker, Mockito.times(1))
+            .publishConfigWithResponse(eq(dataId), eq(group), eq(namespace),
+                Mockito.isNull(), Mockito.isNull(), Mockito.isNull(), eq(content), eq(""),
+                eq(casMd5), eq(type));
+    }
+    
+    @Test
+    void testPublishConfigCas2() throws NacosException {
+        String dataId = "1";
+        String group = "2";
+        String content = "123";
+        String namespace = "public";
+        String casMd5 = "96147704e3cb8be8597d55d75d244a02";
+        String type = ConfigType.PROPERTIES.getType();
+        com.alibaba.nacos.api.config.remote.response.ConfigPublishResponse publishResponse =
+            com.alibaba.nacos.api.config.remote.response.ConfigPublishResponse
+                .buildSuccessResponse();
+        Mockito.when(mockWoker.publishConfigWithResponse(eq(dataId), eq(group), eq(namespace),
+            Mockito.isNull(), Mockito.isNull(), Mockito.isNull(), eq(content), eq(""),
+            eq(casMd5), eq(type))).thenReturn(publishResponse);
+        
+        final boolean b = nacosConfigService.publishConfigCas(dataId, group, content, casMd5, type);
+        assertTrue(b);
+        
+        Mockito.verify(mockWoker, Mockito.times(1))
+            .publishConfigWithResponse(eq(dataId), eq(group), eq(namespace),
+                Mockito.isNull(), Mockito.isNull(), Mockito.isNull(), eq(content), eq(""),
+                eq(casMd5), eq(type));
+    }
+    
+    @Test
+    void testRemoveConfig() throws NacosException {
+        String dataId = "1";
+        String group = "2";
+        String tenant = "public";
+        com.alibaba.nacos.api.config.remote.response.ConfigRemoveResponse removeResponse =
+            com.alibaba.nacos.api.config.remote.response.ConfigRemoveResponse
+                .buildSuccessResponse();
+        Mockito.when(mockWoker.removeConfigWithResponse(eq(dataId), eq(group), eq(tenant),
+            Mockito.isNull())).thenReturn(removeResponse);
+        
+        final boolean b = nacosConfigService.removeConfig(dataId, group);
+        assertTrue(b);
+        
+        Mockito.verify(mockWoker, Mockito.times(1))
+            .removeConfigWithResponse(eq(dataId), eq(group), eq(tenant), Mockito.isNull());
+    }
+    
+    @Test
+    void testRemoveListener() {
+        String dataId = "1";
+        String group = "2";
+        Listener listener = new Listener() {
+            
+            @Override
+            public Executor getExecutor() {
+                return null;
+            }
+            
+            @Override
+            public void receiveConfigInfo(String configInfo) {
+                
+            }
+        };
+        
+        nacosConfigService.removeListener(dataId, group, listener);
+        Mockito.verify(mockWoker, Mockito.times(1)).removeTenantListener(dataId, group, listener);
+    }
+    
+    @Test
+    void testGetServerStatus() {
+        Mockito.when(mockWoker.isHealthServer()).thenReturn(true);
+        assertEquals("UP", nacosConfigService.getServerStatus());
+        Mockito.verify(mockWoker, Mockito.times(1)).isHealthServer();
+        
+        Mockito.when(mockWoker.isHealthServer()).thenReturn(false);
+        assertEquals("DOWN", nacosConfigService.getServerStatus());
+        Mockito.verify(mockWoker, Mockito.times(2)).isHealthServer();
+        
+    }
+    
+    @Test
+    void testFuzzyWatch1() throws NacosException {
+        String groupNamePattern = "default_group";
+        FuzzyWatchEventWatcher fuzzyWatchEventWatcher = new FuzzyWatchEventWatcher() {
+            
+            @Override
+            public void onEvent(ConfigFuzzyWatchChangeEvent event) {
+                
+            }
+            
+            @Override
+            public Executor getExecutor() {
+                return null;
+            }
+        };
+        ConfigFuzzyWatchContext context = Mockito.mock(ConfigFuzzyWatchContext.class);
+        Mockito.when(mockWoker.addTenantFuzzyWatcher(anyString(), anyString(), any()))
+            .thenReturn(context);
+        nacosConfigService.fuzzyWatch(groupNamePattern, fuzzyWatchEventWatcher);
+        Mockito.verify(mockWoker, Mockito.times(1))
+            .addTenantFuzzyWatcher(ALL_PATTERN, groupNamePattern, fuzzyWatchEventWatcher);
+        Mockito.verify(context, Mockito.times(1)).createNewFuture();
+    }
+    
+    @Test
+    void testFuzzyWatch2() throws NacosException {
+        String groupNamePattern = "default_group";
+        String dataIdPattern = "dataId*";
+        FuzzyWatchEventWatcher fuzzyWatchEventWatcher = new FuzzyWatchEventWatcher() {
+            
+            @Override
+            public void onEvent(ConfigFuzzyWatchChangeEvent event) {
+                
+            }
+            
+            @Override
+            public Executor getExecutor() {
+                return null;
+            }
+        };
+        ConfigFuzzyWatchContext context = Mockito.mock(ConfigFuzzyWatchContext.class);
+        Mockito.when(mockWoker.addTenantFuzzyWatcher(anyString(), anyString(), any()))
+            .thenReturn(context);
+        nacosConfigService.fuzzyWatch(dataIdPattern, groupNamePattern, fuzzyWatchEventWatcher);
+        Mockito.verify(mockWoker, Mockito.times(1))
+            .addTenantFuzzyWatcher(dataIdPattern, groupNamePattern, fuzzyWatchEventWatcher);
+        Mockito.verify(context, Mockito.times(1)).createNewFuture();
+    }
+    
+    @Test
+    void testFuzzyWatch3() throws NacosException {
+        String groupNamePattern = "group";
+        String dataIdPattern = "dataId*";
+        String namespace = "public";
+        FuzzyWatchEventWatcher fuzzyWatchEventWatcher = new FuzzyWatchEventWatcher() {
+            
+            @Override
+            public void onEvent(ConfigFuzzyWatchChangeEvent event) {
+                
+            }
+            
+            @Override
+            public Executor getExecutor() {
+                return null;
+            }
+        };
+        String patternKey =
+            FuzzyGroupKeyPattern.generatePattern(dataIdPattern, groupNamePattern, namespace);
+        ConfigFuzzyWatchContext context = new ConfigFuzzyWatchContext("", patternKey);
+        Mockito.when(mockWoker.addTenantFuzzyWatcher(anyString(), anyString(), any()))
+            .thenReturn(context);
+        Future<Set<String>> setFuture = nacosConfigService.fuzzyWatchWithGroupKeys(groupNamePattern,
+            fuzzyWatchEventWatcher);
+        Mockito.verify(mockWoker, Mockito.times(1))
+            .addTenantFuzzyWatcher(ALL_PATTERN, groupNamePattern, fuzzyWatchEventWatcher);
+        Assertions.assertNotNull(setFuture);
+    }
+    
+    @Test
+    void testFuzzyWatch4() throws NacosException {
+        String groupNamePattern = "group";
+        String dataIdPattern = "dataId*";
+        String namespace = "public";
+        FuzzyWatchEventWatcher fuzzyWatchEventWatcher = new FuzzyWatchEventWatcher() {
+            
+            @Override
+            public void onEvent(ConfigFuzzyWatchChangeEvent event) {
+                
+            }
+            
+            @Override
+            public Executor getExecutor() {
+                return null;
+            }
+        };
+        String patternKey =
+            FuzzyGroupKeyPattern.generatePattern(dataIdPattern, groupNamePattern, namespace);
+        ConfigFuzzyWatchContext context = new ConfigFuzzyWatchContext("", patternKey);
+        Mockito.when(mockWoker.addTenantFuzzyWatcher(anyString(), anyString(), any()))
+            .thenReturn(context);
+        Future<Set<String>> setFuture =
+            nacosConfigService.fuzzyWatchWithGroupKeys(dataIdPattern, groupNamePattern,
+                fuzzyWatchEventWatcher);
+        Mockito.verify(mockWoker, Mockito.times(1))
+            .addTenantFuzzyWatcher(dataIdPattern, groupNamePattern, fuzzyWatchEventWatcher);
+        Assertions.assertNotNull(setFuture);
+    }
+    
+    @Test
+    void testShutDown() {
+        Assertions.assertDoesNotThrow(() -> {
+            nacosConfigService.shutDown();
+        });
+    }
+    
+    @Test
+    void testGetConfigWithResultFromServer() throws NacosException {
+        ConfigResponse response = new ConfigResponse();
+        response.setContent("server-content");
+        response.setMd5("md5val");
+        response.setConfigType("yaml");
+        response.setEncryptedDataKey("ek");
+        Mockito.when(mockWoker.getServerConfig(eq("d"), eq("g"), eq("public"), eq(3000L),
+            eq(false), Mockito.isNull())).thenReturn(response);
+        Mockito.when(mockWoker.getServerConfig(eq("d"), eq("g"), eq("public"), eq(3000L),
+            eq(false), Mockito.isNull(), any(ClientWorker.LocalConfigContent.class)))
+            .thenReturn(response);
+        Mockito.when(mockWoker.getServerConfig(eq("d"), eq("g"), eq("public"), eq(3000L),
+            eq(false))).thenReturn(response);
+        com.alibaba.nacos.api.config.ConfigQueryResult result =
+            nacosConfigService.getConfigWithResult("d", "g", 3000);
+        assertEquals("server-content", result.getContent());
+        assertEquals("md5val", result.getMd5());
+        assertEquals("yaml", result.getConfigType());
+        assertEquals("ek", result.getEncryptedDataKey());
+    }
+    
+    @Test
+    void testGetConfigWithResultFromFailover() throws NacosException {
+        try (MockedStatic<LocalConfigInfoProcessor> processor =
+            Mockito.mockStatic(LocalConfigInfoProcessor.class)) {
+            processor.when(() -> LocalConfigInfoProcessor.getFailover(any(),
+                eq("dfo"), eq("g"), eq("public"))).thenReturn("failover-content");
+            com.alibaba.nacos.api.config.ConfigQueryResult result =
+                nacosConfigService.getConfigWithResult("dfo", "g", 3000);
+            assertEquals("failover-content", result.getContent());
+        }
+    }
+    
+    @Test
+    void testGetConfigWithResultFromSnapshot() throws NacosException {
+        try (MockedStatic<LocalConfigInfoProcessor> processor =
+            Mockito.mockStatic(LocalConfigInfoProcessor.class)) {
+            processor.when(() -> LocalConfigInfoProcessor.getFailover(any(),
+                eq("dsnap"), eq("g"), eq("public"))).thenReturn(null);
+            processor.when(() -> LocalConfigInfoProcessor.getSnapshot(any(),
+                eq("dsnap"), eq("g"), eq("public"))).thenReturn("snapshot-content");
+            Mockito.when(mockWoker.getServerConfig(eq("dsnap"), eq("g"), eq("public"),
+                eq(3000L), eq(false), Mockito.isNull())).thenThrow(
+                    new NacosException(500, "down"));
+            Mockito.when(mockWoker.getServerConfig(eq("dsnap"), eq("g"), eq("public"),
+                eq(3000L), eq(false), anyString(), any(ClientWorker.LocalConfigContent.class)))
+                .thenThrow(new NacosException(500, "down"));
+            Mockito.when(mockWoker.getServerConfig(eq("dsnap"), eq("g"), eq("public"),
+                eq(3000L), eq(false))).thenThrow(new NacosException(500, "down"));
+            com.alibaba.nacos.api.config.ConfigQueryResult result =
+                nacosConfigService.getConfigWithResult("dsnap", "g", 3000);
+            assertEquals("snapshot-content", result.getContent());
+        }
+    }
+    
+    @Test
+    void testGetConfigWithResultThrowsOnNoRight() throws NacosException {
+        try (MockedStatic<LocalConfigInfoProcessor> processor =
+            Mockito.mockStatic(LocalConfigInfoProcessor.class)) {
+            processor.when(() -> LocalConfigInfoProcessor.getFailover(any(),
+                eq("dnr"), eq("g"), eq("public"))).thenReturn(null);
+            Mockito.when(mockWoker.getServerConfig(eq("dnr"), eq("g"), eq("public"),
+                eq(3000L), eq(false), Mockito.isNull())).thenThrow(
+                    new NacosException(NacosException.NO_RIGHT, "no right"));
+            Mockito.when(mockWoker.getServerConfig(eq("dnr"), eq("g"), eq("public"),
+                eq(3000L), eq(false), Mockito.isNull(), any(ClientWorker.LocalConfigContent.class)))
+                .thenThrow(new NacosException(NacosException.NO_RIGHT, "no right"));
+            Mockito.when(mockWoker.getServerConfig(eq("dnr"), eq("g"), eq("public"),
+                eq(3000L), eq(false))).thenThrow(
+                    new NacosException(NacosException.NO_RIGHT, "no right"));
+            NacosException ex = Assertions.assertThrows(NacosException.class,
+                () -> nacosConfigService.getConfigWithResult("dnr", "g", 3000));
+            assertEquals(NacosException.NO_RIGHT, ex.getErrCode());
+        }
+    }
+    
+    @Test
+    void testCancelFuzzyWatchWithNullWatcher() throws NacosException {
+        // null watcher → early return; should not call worker
+        nacosConfigService.cancelFuzzyWatch("g*", (FuzzyWatchEventWatcher) null);
+        Mockito.verify(mockWoker, Mockito.never())
+            .removeFuzzyListenListener(anyString(), anyString(), any());
+    }
+    
+    @Test
+    void testCancelFuzzyWatchWithWatcherDelegates() throws NacosException {
+        FuzzyWatchEventWatcher watcher = new FuzzyWatchEventWatcher() {
+            
+            @Override
+            public void onEvent(ConfigFuzzyWatchChangeEvent event) {
+            }
+            
+            @Override
+            public Executor getExecutor() {
+                return null;
+            }
+        };
+        nacosConfigService.cancelFuzzyWatch("g*", watcher);
+        Mockito.verify(mockWoker, Mockito.times(1))
+            .removeFuzzyListenListener(ALL_PATTERN, "g*", watcher);
+    }
+    
+    @Test
+    void testCancelFuzzyWatchWithDataIdPattern() throws NacosException {
+        FuzzyWatchEventWatcher watcher = new FuzzyWatchEventWatcher() {
+            
+            @Override
+            public void onEvent(ConfigFuzzyWatchChangeEvent event) {
+            }
+            
+            @Override
+            public Executor getExecutor() {
+                return null;
+            }
+        };
+        nacosConfigService.cancelFuzzyWatch("d*", "g*", watcher);
+        Mockito.verify(mockWoker, Mockito.times(1))
+            .removeFuzzyListenListener("d*", "g*", watcher);
+    }
+    
+    @Test
+    void testAddConfigFilterDelegates() {
+        com.alibaba.nacos.api.config.filter.IConfigFilter filter =
+            Mockito.mock(com.alibaba.nacos.api.config.filter.IConfigFilter.class);
+        Assertions.assertDoesNotThrow(() -> nacosConfigService.addConfigFilter(filter));
+    }
+    
+    @Test
+    void testGetConfigWithRequestFromServer() throws NacosException {
+        ConfigResponse response = new ConfigResponse();
+        response.setContent("request-content");
+        response.setMd5("request-md5");
+        response.setConfigType("json");
+        response.setEncryptedDataKey("request-ek");
+        Mockito.when(mockWoker.getServerConfig(eq("req-data"), eq("req-group"), eq("public"),
+            eq(3000L), eq(false), Mockito.isNull())).thenReturn(response);
+        Mockito.when(mockWoker.getServerConfig(eq("req-data"), eq("req-group"), eq("public"),
+            eq(3000L), eq(false), Mockito.isNull(), any(ClientWorker.LocalConfigContent.class)))
+            .thenReturn(response);
+        
+        GetConfigRequest request = GetConfigRequest.builder()
+            .dataId("req-data")
+            .group("req-group")
+            .timeoutMs(3000)
+            .build();
+        com.alibaba.nacos.api.config.ConfigQueryResult result =
+            nacosConfigService.getConfig(request);
+        
+        assertEquals("request-content", result.getContent());
+        assertEquals("request-md5", result.getMd5());
+        assertEquals("json", result.getConfigType());
+        assertEquals("request-ek", result.getEncryptedDataKey());
+    }
+    
+    @Test
+    void testPublishConfigWithRequestSuccess() throws NacosException {
+        com.alibaba.nacos.api.config.remote.response.ConfigPublishResponse publishResponse =
+            com.alibaba.nacos.api.config.remote.response.ConfigPublishResponse
+                .buildSuccessResponse();
+        Mockito.when(mockWoker.publishConfigWithResponse(anyString(), anyString(), anyString(),
+            Mockito.any(), Mockito.any(), Mockito.any(), anyString(), Mockito.any(),
+            Mockito.any(), anyString())).thenReturn(publishResponse);
+        
+        PublishConfigRequest request = PublishConfigRequest.builder()
+            .dataId("pub-data")
+            .group("pub-group")
+            .content("pub-content")
+            .type("text")
+            .build();
+        PublishConfigResult result = nacosConfigService.publishConfig(request);
+        
+        assertTrue(result.isSuccess());
+        Mockito.verify(mockWoker, Mockito.times(1)).publishConfigWithResponse(eq("pub-data"),
+            eq("pub-group"), eq("public"), Mockito.any(), Mockito.any(), Mockito.any(),
+            eq("pub-content"), Mockito.any(), Mockito.any(), eq("text"));
+    }
+    
+    @Test
+    void testPublishConfigWithRequestFailureWithDetails() throws NacosException {
+        com.alibaba.nacos.api.config.remote.response.ConfigPublishResponse failResponse =
+            com.alibaba.nacos.api.config.remote.response.ConfigPublishResponse
+                .buildFailResponse(403, "no permission");
+        Mockito.when(mockWoker.publishConfigWithResponse(anyString(), anyString(), anyString(),
+            Mockito.any(), Mockito.any(), Mockito.any(), anyString(), Mockito.any(),
+            Mockito.any(), anyString())).thenReturn(failResponse);
+        
+        PublishConfigRequest request = PublishConfigRequest.builder()
+            .dataId("pub-fail")
+            .group("pub-group")
+            .content("pub-content")
+            .type("text")
+            .build();
+        PublishConfigResult result = nacosConfigService.publishConfig(request);
+        
+        Assertions.assertFalse(result.isSuccess());
+        assertEquals(403, result.getErrorCode());
+        assertEquals("no permission", result.getErrorMessage());
+    }
+    
+    @Test
+    void testPublishConfigWithRequestNacosExceptionPreservesErrorCode() throws NacosException {
+        // RpcClient turns ErrorResponse into NacosException carrying the original error code.
+        // publishConfigWithResponse must preserve getErrCode()/message instead of collapsing to -1.
+        Mockito.when(mockWoker.publishConfigWithResponse(anyString(), anyString(), anyString(),
+            Mockito.any(), Mockito.any(), Mockito.any(), anyString(), Mockito.any(),
+            Mockito.any(), anyString()))
+            .thenThrow(new NacosException(NacosException.NO_RIGHT, "no right for publish"));
+        
+        PublishConfigRequest request = PublishConfigRequest.builder()
+            .dataId("pub-ex")
+            .group("pub-group")
+            .content("pub-content")
+            .type("text")
+            .build();
+        PublishConfigResult result = nacosConfigService.publishConfig(request);
+        
+        Assertions.assertFalse(result.isSuccess());
+        assertEquals(NacosException.NO_RIGHT, result.getErrorCode());
+        assertEquals("no right for publish", result.getErrorMessage());
+    }
+    
+    @Test
+    void testGetConfigWithExplicitMd5NoMatchingLocalRepresentation() throws NacosException {
+        // When caller explicitly provides localMd5 but no matching local content exists,
+        // the query should be sent without conditional MD5 (hasLocalRepresentation=false),
+        // avoiding a 304 with no restorable content.
+        ConfigResponse response = new ConfigResponse();
+        response.setContent("server-content-explicit");
+        response.setMd5("server-md5-explicit");
+        response.setConfigType("text");
+        
+        // Mock the 7-arg getServerConfig with any localMd5 (since no local representation,
+        // conditionalMd5 will be null, but we mock anyString to cover both paths)
+        Mockito.when(mockWoker.getServerConfig(eq("explicit-data"), eq("g"), eq("public"),
+            eq(3000L), eq(false), Mockito.isNull(), any(ClientWorker.LocalConfigContent.class)))
+            .thenReturn(response);
+        
+        GetConfigRequest request = GetConfigRequest.builder()
+            .dataId("explicit-data")
+            .group("g")
+            .timeoutMs(3000)
+            .localMd5("non-matching-md5-xyz")
+            .build();
+        com.alibaba.nacos.api.config.ConfigQueryResult result =
+            nacosConfigService.getConfig(request);
+        
+        assertEquals("server-content-explicit", result.getContent());
+        assertEquals("server-md5-explicit", result.getMd5());
+    }
+    
+    @Test
+    void testRemoveConfigWithRequestSuccess() throws NacosException {
+        com.alibaba.nacos.api.config.remote.response.ConfigRemoveResponse removeResponse =
+            com.alibaba.nacos.api.config.remote.response.ConfigRemoveResponse
+                .buildSuccessResponse();
+        Mockito.when(mockWoker.removeConfigWithResponse(anyString(), anyString(), anyString(),
+            Mockito.isNull())).thenReturn(removeResponse);
+        
+        RemoveConfigRequest request = RemoveConfigRequest.builder()
+            .dataId("rem-data")
+            .group("rem-group")
+            .build();
+        RemoveConfigResult result = nacosConfigService.removeConfig(request);
+        
+        assertTrue(result.isSuccess());
+        Mockito.verify(mockWoker, Mockito.times(1)).removeConfigWithResponse(eq("rem-data"),
+            eq("rem-group"), eq("public"), Mockito.isNull());
+    }
+    
+    @Test
+    void testRemoveConfigWithRequestFailureWithDetails() throws NacosException {
+        com.alibaba.nacos.api.config.remote.response.ConfigRemoveResponse failResponse =
+            com.alibaba.nacos.api.config.remote.response.ConfigRemoveResponse
+                .buildFailResponse("server error");
+        failResponse.setErrorCode(500);
+        Mockito.when(mockWoker.removeConfigWithResponse(anyString(), anyString(), anyString(),
+            Mockito.isNull())).thenReturn(failResponse);
+        
+        RemoveConfigRequest request = RemoveConfigRequest.builder()
+            .dataId("rem-fail")
+            .group("rem-group")
+            .build();
+        RemoveConfigResult result = nacosConfigService.removeConfig(request);
+        
+        Assertions.assertFalse(result.isSuccess());
+        assertEquals(500, result.getErrorCode());
+        assertEquals("server error", result.getErrorMessage());
+    }
+    
+    @Test
+    void testPlaintextDiskSnapshotAllowsConditionalGet() throws NacosException {
+        // Non-encrypted plaintext disk snapshot CAN be used for conditional GET because MD5
+        // is computed from the captured content and no decryption key is needed.
+        final String dataId = "plaintext-data";
+        final String group = "g";
+        final String tenant = "public";
+        
+        MockedStatic<LocalConfigInfoProcessor> localMock =
+            Mockito.mockStatic(LocalConfigInfoProcessor.class);
+        MockedStatic<LocalEncryptedDataKeyProcessor> keyMock =
+            Mockito.mockStatic(LocalEncryptedDataKeyProcessor.class);
+        try {
+            String plainContent = "plain-text-config-content";
+            localMock.when(() -> LocalConfigInfoProcessor.getSnapshot(any(), eq(dataId),
+                eq(group), eq(tenant))).thenReturn(plainContent);
+            keyMock.when(() -> LocalEncryptedDataKeyProcessor.getEncryptDataKeySnapshot(any(),
+                eq(dataId), eq(group), eq(tenant))).thenReturn(null);
+            
+            ConfigResponse response = new ConfigResponse();
+            response.setContent("server-content");
+            response.setMd5("server-md5");
+            
+            Mockito.lenient().when(mockWoker.getServerConfig(anyString(), anyString(), anyString(),
+                anyLong(), eq(false))).thenReturn(response);
+            Mockito.lenient().when(mockWoker.getServerConfig(anyString(), anyString(), anyString(),
+                anyLong(), eq(false), anyString())).thenReturn(response);
+            Mockito.lenient().when(mockWoker.getServerConfig(anyString(), anyString(), anyString(),
+                anyLong(), eq(false), anyString(), any(ClientWorker.LocalConfigContent.class)))
+                .thenReturn(response);
+            
+            final String config = nacosConfigService.getConfig(dataId, group, 3000);
+            assertEquals("server-content", config);
+            
+            ArgumentCaptor<ClientWorker.LocalConfigContent> localCaptor =
+                ArgumentCaptor.forClass(ClientWorker.LocalConfigContent.class);
+            Mockito.verify(mockWoker, Mockito.times(1)).getServerConfig(eq(dataId), eq(group),
+                eq(tenant), eq(3000L), eq(false), anyString(), localCaptor.capture());
+            
+            ClientWorker.LocalConfigContent local = localCaptor.getValue();
+            assertNotNull(local);
+            // Plaintext disk snapshot: CAN be used for conditional GET
+            assertTrue(local.hasLocalRepresentation(),
+                "Plaintext disk snapshot should be usable for conditional GET");
+            assertEquals(MD5Utils.md5Hex(plainContent, "UTF-8"), local.getMd5());
+        } finally {
+            localMock.close();
+            keyMock.close();
+        }
+    }
+    
+    @Test
+    void testCipherDataIdWithMissingKeySkipsConditionalGet() throws Exception {
+        // "cipher-" is a dataId prefix (per EncryptionHandler.checkCipher()), not a ciphertext-
+        // content prefix. A cipher-* dataId always requires a decryption key, even when the key
+        // file is missing and the content does not start with "cipher-". This test verifies that
+        // such a configuration skips conditional GET (hasLocalRepresentation=false).
+        final String dataId = "cipher-aes-my-config";
+        final String group = "g";
+        final String tenant = "public";
+        
+        MockedStatic<LocalConfigInfoProcessor> localMock =
+            Mockito.mockStatic(LocalConfigInfoProcessor.class);
+        MockedStatic<LocalEncryptedDataKeyProcessor> keyMock =
+            Mockito.mockStatic(LocalEncryptedDataKeyProcessor.class);
+        try {
+            // Content does NOT start with "cipher-" (normal ciphertext after encryption)
+            String cipherContent = "encrypted-base64-content-xyz123";
+            localMock.when(() -> LocalConfigInfoProcessor.getSnapshot(any(), eq(dataId),
+                eq(group), eq(tenant))).thenReturn(cipherContent);
+            // Key file is missing
+            keyMock.when(() -> LocalEncryptedDataKeyProcessor.getEncryptDataKeySnapshot(any(),
+                eq(dataId), eq(group), eq(tenant))).thenReturn(null);
+            
+            // Use reflection to call the private resolveLocalConfigContent method directly
+            Method resolveMethod = NacosConfigService.class.getDeclaredMethod(
+                "resolveLocalConfigContent", String.class, String.class);
+            resolveMethod.setAccessible(true);
+            Object localContent = resolveMethod.invoke(nacosConfigService, dataId, group);
+            
+            assertNotNull(localContent);
+            
+            // Verify hasLocalRepresentation is false (conditional GET skipped)
+            Method hasLocalRepMethod = localContent.getClass().getDeclaredMethod(
+                "hasLocalRepresentation");
+            hasLocalRepMethod.setAccessible(true);
+            boolean hasLocalRep = (boolean) hasLocalRepMethod.invoke(localContent);
+            assertFalse(hasLocalRep,
+                "cipher-* dataId with missing key must skip conditional GET");
+            
+            // Verify md5 is null
+            Method getMd5Method = localContent.getClass().getDeclaredMethod("getMd5");
+            getMd5Method.setAccessible(true);
+            Object md5 = getMd5Method.invoke(localContent);
+            assertNull(md5, "MD5 must be null when conditional GET is skipped");
+        } finally {
+            localMock.close();
+            keyMock.close();
+        }
+    }
+    
+    @Test
+    void testCipherDataIdWithKeySkipsConditionalGet() throws Exception {
+        // A cipher-* dataId with both ciphertext content and key file present must still skip
+        // conditional GET because the disk content/key pairing cannot be proven (separate writes).
+        final String dataId = "cipher-aes-config-with-key";
+        final String group = "g";
+        final String tenant = "public";
+        
+        MockedStatic<LocalConfigInfoProcessor> localMock =
+            Mockito.mockStatic(LocalConfigInfoProcessor.class);
+        MockedStatic<LocalEncryptedDataKeyProcessor> keyMock =
+            Mockito.mockStatic(LocalEncryptedDataKeyProcessor.class);
+        try {
+            localMock.when(() -> LocalConfigInfoProcessor.getSnapshot(any(), eq(dataId),
+                eq(group), eq(tenant))).thenReturn("encrypted-content");
+            keyMock.when(() -> LocalEncryptedDataKeyProcessor.getEncryptDataKeySnapshot(any(),
+                eq(dataId), eq(group), eq(tenant))).thenReturn("disk-encryption-key");
+            
+            Method resolveMethod = NacosConfigService.class.getDeclaredMethod(
+                "resolveLocalConfigContent", String.class, String.class);
+            resolveMethod.setAccessible(true);
+            Object localContent = resolveMethod.invoke(nacosConfigService, dataId, group);
+            
+            Method hasLocalRepMethod = localContent.getClass().getDeclaredMethod(
+                "hasLocalRepresentation");
+            hasLocalRepMethod.setAccessible(true);
+            boolean hasLocalRep = (boolean) hasLocalRepMethod.invoke(localContent);
+            assertFalse(hasLocalRep,
+                "cipher-* dataId with disk key must still skip conditional GET (unverified pairing)");
+        } finally {
+            localMock.close();
+            keyMock.close();
+        }
+    }
+}

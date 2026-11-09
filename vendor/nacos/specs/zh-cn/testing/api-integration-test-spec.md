@@ -1,0 +1,256 @@
+<!--
+  Copyright 1999-2026 Alibaba Group Holding Ltd.
+
+  Licensed under the Apache License, Version 2.0 (the "License");
+  you may not use this file except in compliance with the License.
+  You may obtain a copy of the License at
+
+       http://www.apache.org/licenses/LICENSE-2.0
+
+  Unless required by applicable law or agreed to in writing, software
+  distributed under the License is distributed on an "AS IS" BASIS,
+  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+  See the License for the specific language governing permissions and
+  limitations under the License.
+-->
+
+# API 集成测试规范
+
+本规范定义 Nacos HTTP API 必须遵守的集成测试模型。凡是通过 HTTP
+Controller 或 OpenAPI 文档暴露的 Open API、Admin API、Console API 和
+Auth API 变更，都适用本规范。
+
+API IT 的目标是 API 场景覆盖，不是行覆盖率或分支覆盖率。测试必须证明部署
+后的服务端对外可见契约符合预期。
+
+## 1. 范围
+
+API IT 的主要位置是 `test/openapi-test`。该模块基于已经启动的单机 Nacos
+服务，以外部 HTTP 客户端方式访问 API。
+
+本规范覆盖：
+
+- 新增、修改、删除或废弃 HTTP API 路由；
+- 修改请求参数、校验规则、默认值、请求体结构、上传文件、请求头或查询参数
+  序列化方式；
+- 修改响应状态码、`Result<T>` 返回体结构、下载或流式响应结构、错误码、
+  message 或领域字段；
+- 修改 API 对外可见的业务行为、副作用、鉴权、兼容逻辑或生成的
+  OpenAPI/Swagger 定义。
+
+单元测试和 Controller 测试仍然可能是必要的，但不能替代 API 对外 HTTP 行为
+的集成测试。
+
+## 2. API 变更规则
+
+在实现 API 新增、修改、删除或废弃前，变更负责人必须先完成 IT 影响分析：
+
+1. 识别受影响的 API 面向对象以及现有 IT 类。
+2. 阅读 Controller、Form/Request 模型、校验器、响应模型、Service 路径、
+   异常处理和对应领域规范。
+3. 形成场景矩阵，覆盖预期功能、边界/校验行为以及异常/错误处理。
+4. 在同一个变更集中新增、更新或移除 `test/openapi-test` 用例，使其匹配新的
+   API 契约。
+5. 更新 `test/openapi-test` 下的覆盖索引，例如 `API_TEST_COVERAGE.md` 以及
+   各 API 面向对象的场景文档。
+
+如果功能成功路径在单机 IT 环境中难以实际执行，仍然必须尽可能覆盖校验、
+边界、响应契约和受控错误场景。未覆盖的功能路径及原因必须记录在场景索引
+或类 Javadoc 中。
+
+## 3. 必须覆盖的场景组
+
+每个 API IT 都应覆盖以下场景组，除非该组对该 API 不可观测。跳过的场景组
+必须说明原因。
+
+### 3.1 预期功能
+
+测试必须证明 API 能完成设计目标。优先使用创建后查询、更新后查询、发布后
+读取、删除后确认不存在、列表/过滤断言等方式验证持久副作用或返回的领域
+状态。
+
+断言必须检查重要响应字段，不能只判断 HTTP 成功。
+
+### 3.2 边界和校验
+
+测试必须根据代码分析覆盖重要请求边界，包括必填字段、可选默认值、空字符串、
+枚举值、分页、命名空间/分组/名称规范化、异常 JSON、上传边界、版本选择、
+过滤条件，以及被接受但忽略的参数。
+
+当输入空间很大时，应覆盖契约等价类，并在场景文档中记录剩余风险。
+
+### 3.3 异常和错误处理
+
+测试必须验证关键失败分支是受控的：
+
+- 参数校验失败应返回 HTTP 400，而不是 HTTP 500；
+- 不存在、冲突、禁用、未授权或非法状态错误应符合 Controller 契约；
+- 使用 `Result<T>` 的 JSON 错误返回应保持期望的 `code`、`message` 和
+  `data` 结构；
+- 下载或流式 API 在实现暴露错误返回时，也应对非法输入返回受控错误。
+
+## 4. 测试组织
+
+API IT 应按 API 面向对象和领域组织：
+
+- Client OpenAPI：`com.alibaba.nacos.test.openapi.client.<domain>`
+- Admin API：`com.alibaba.nacos.test.adminapi.<domain>`
+- Console API：`com.alibaba.nacos.test.consoleapi.<domain>`
+- Auth API：新增 Auth API IT 时使用
+  `com.alibaba.nacos.test.authapi.<domain>`
+
+建议一个 API 端点或一组强关联 API 工作流对应一个测试类。测试类可以使用辅助
+API 创建前置资源或清理数据，但文档中的场景矩阵应聚焦在该类命名的 API 上。
+
+多个 IT 类都需要的 HTTP 客户端构造、基础地址构造、JSON 断言、重试辅助方法
+和清理逻辑，应抽象到基础类中复用。
+
+## 5. 测试数据和运行规则
+
+API IT 必须保持数据隔离和可重复执行：
+
+- 对可变资源生成唯一名称；
+- 只有 API 契约支持时，才使用 public 命名空间默认值；
+- 使用 `finally` 或测试清理辅助方法清理创建的资源；
+- 清理逻辑应容忍资源已经不存在；
+- 避免修改共享运行时状态，除非被测 API 必须修改且测试会恢复原状态；
+- 仅在异步服务端效果需要时使用有界重试。
+
+### 5.1 默认鉴权运行基线
+
+在 Nacos 3.3 版本线中，标准 Required 单机 API IT 使用发行包默认值开启 Client、Admin 和 Console
+鉴权。工作流不得重写这些范围开关，也不得关闭默认权限缓存；启动前可以配置部署环境独立的 token secret
+和 server identity。
+
+标准测试身份包括：
+
+- 拥有 Client API 功能场景所需读写权限的非管理员 Client 身份；
+- 用于 action 边界场景的只读 Client 身份；
+- 已认证但无权限的身份；
+- 用于 Admin、Console、Auth API 和测试数据准备的全局管理员；
+- 显式匿名和错误凭据请求模式。
+
+功能 API 场景按受众使用正确身份，并继续断言完整业务结果、边界行为和受控错误。鉴权检查是附加覆盖层，
+不得替代功能断言。公开、仅初始化和有意匿名的端点使用显式匿名请求模式，不能继承基类的空 Header 默认值。
+发送到外部适配器端口的请求不得继承 Nacos 凭据。
+
+每个受保护 Controller operation 都必须进入可审计清单，并分类为直接鉴权测试、由经过审核的等价鉴权
+元组/Parser 组覆盖，或由规范明确声明为公开/排除。默认鉴权用户、角色、权限、可见性 API，自定义资源
+Parser、匿名行为、multipart/raw request 和安全回归路径必须有 operation 级直接覆盖。默认权限缓存保持
+开启，权限修改通过有界重试观察生效。
+
+HTTP 功能、Auth API 和 URI 安全场景统一归属 `test/openapi-test`。迁移期间可以保留独立 auth-only
+Maven 模块或工作流，但它不属于最终标准测试拓扑。
+
+## 6. API 删除和废弃
+
+删除 API 路由时，必须在同一变更中删除或更新对应 IT 覆盖。如果兼容行为仍然
+保留，应为废弃或兼容路由补充 IT，并记录迁移预期。
+
+删除、重命名请求或响应字段，或改变字段语义时，IT 必须验证新契约；必要时
+还要验证旧契约的兼容或拒绝行为。
+
+## 7. 场景文档
+
+每个 API IT 都必须让维护者能够看到它覆盖了哪些场景。较小的测试类可以使用
+类 Javadoc 的 `Scenario coverage` 小节；较大的 API 面应更新
+`test/openapi-test` 下的 Markdown 场景索引。
+
+文档必须说明验证了什么，而不是只列测试方法名。文档还必须记录有意未覆盖的
+分支、被接受但忽略的参数，以及单机环境限制。
+
+## 8. 验证
+
+API IT 变更需要对 `test/openapi-test` 运行格式化和编译验证。在单机 Nacos
+服务可用时，应运行相关 Failsafe IT 选择或对应 API 面的全量选择。
+
+仅修改 IT 覆盖索引文档时，最低验证要求是受影响模块的 license 和格式检查。
+
+## 9. AI Resource Search 与 Agent 场景
+
+共享 Search Core、Agent projection 或 ARD Agent 表示变更时，OpenAPI IT 场景矩阵至少覆盖：
+
+- ARD 关闭但 `nacos.ai.resource.search.enabled=true` 时，RAD 和资源专用 Search 仍可使用基础索引；
+- Agent 名称 literal contains、Tag ALL、Protocol ANY、组合 AND、大小写及 `%`、`_`、`\\`
+  字面量，首/中/尾/越界页与正确 total；
+- 创建、metadata 更新、Version publish/online/offline/delete、latest/label 变化后的有界等待收敛；
+- Endpoint register/deregister/heartbeat 只改变 Discover，不改变目录 Search document；
+- `AUTO` 或 `INDEX` 未 READY 时成功返回且不混合的当前快照、最终完整收敛，以及 `SCAN` 始终走兼容路径；
+- 通用 Search 指定单一 Agent、AgentSpec、Skill、Prompt 或 MCP 时，与对应资源专用 Search 的候选
+  资格、可见性和当前性结果一致；
+- ARD 纯 A2A、多协议和只有旧 online Version 支持 A2A 的 type filter、primary 表示、稳定
+  identifier、representation-specific Artifact URL、offline/digest 失效和 Runtime 状态排除。
+
+测试异步索引时只允许有界轮询公开 API 可见结果，不得依赖固定 sleep、数据库内部行或任务执行顺序。
+
+## 10. Agent HTTP Watch 场景
+
+Agent HTTP Batch-long-poll Watch Binding 发生变化时，OpenAPI IT 至少覆盖：
+
+- 一个请求携带多个 Agent Watch Item，并在 Definition、Latest/Label、Runtime Endpoint、
+  Liveness 和 Visibility 变化后只返回变化的调用方 Item ID；
+- Timeout 返回 `changed=false`，随后使用下一 Generation 和完整 List 立即复用；
+- Add/Remove Generation、迟到的前一轮 Response、重复 Item ID、混合 Namespace、空/超大
+  Batch、非法 Fingerprint、Timeout 边界、Form Size 边界和已配置 Watch 软容量；
+- 缺失或非法 `X-Nacos-Client-Id` 与 `Request-Module`、请求级 AI Read 拒绝，以及成功
+  Response 不包含 Descriptor、Endpoint 或逐 Item 鉴权数据；
+- 变化 ID 只能通过普通鉴权 Discover 重新读取，包括不可见与缺失资源的标准受控结果；
+- Server Restart 和重复 Long Poll 通过有界公开 API 轮询收敛，不依赖 Socket Cancel 时机、
+  固定 Server Node 或内部 Waiter State。
+
+## 11. MCP 迁移与生命周期场景
+
+实现 MCP 生命周期托管时，OpenAPI IT 场景矩阵至少覆盖：
+
+- `SYNCING` 期间和 `LIFECYCLE_MANAGED` 后，现有 Admin/Console
+  Create/Update/Query/List/Delete 请求与响应形态保持一致，包括兼容专用的同 Version
+  Overwrite 和 Latest 参数；
+- Name-Only、Name+ID 和历史 ID-Only 管理输入，包括协议身份认证后针对 ID-Only 标准名称的
+  精确二次鉴权，以及 Resource Alias 缺失、重复或冲突的受控错误；
+- 新 Version List/Detail 以及 Draft、Submit、Reviewed/Publish、Force Publish、Redraft、
+  Online/Offline、自定义 Label 和非法状态路径，并保证 Admin 与 Console 语义等价；
+- Enable Resource 通过不变的历史 Serving 投影只暴露 Online Version，
+  Draft/Reviewing/Reviewed/Offline 只通过新的管理读取暴露；
+- 历史 Fixture 在 `SYNCING` 期间保持完整可见、异步对账幂等、全节点管理能力门禁、
+  零差异自动切换和重启后状态保持；
+- Manifest/Server/Tools/Resources Config 坐标和字节不变；对账不修改 Naming Service、
+  Instance、frontend/backend 或 Runtime Metadata；
+- Manifest-Last Publish、Offline 从 Serving View 移除但保留内容和 Direct Service，
+  以及旧 Config/Naming 消费者不会观察到不完整 Version 内容；
+- Version 与完整 Resource 删除、Manifest-First 停止 Serving、Direct 或内容清理失败后保留
+  Resource/Version Row、Manifest 删除后按 Deprecated ID 重试，并且不误删普通被引用 Service
+  或 Client Runtime 状态；
+- 内容缺失、非法 Manifest、Row 冲突和 Storage 部分删除失败均表现为受控行为，并阻止托管切换；
+- 通用/MCP 专用 Search 使用标准 `mcpName`、耐久异步收敛和历史 ID-Keyed 清理，同时保持
+  Unified Import 与 Registry Adaptor 在管理路由切换期间的兼容性。
+
+迁移测试只把公开行为和重启后的耐久结果作为断言契约。测试准备可以写入文档化的历史 Fixture，
+但不能用直接数据库 row 断言作为成功标准。所有异步条件都使用有界轮询，不使用固定 sleep。
+
+迁移状态和切流场景必须由显式 Phase Gate 的测试类及独立迁移工作流承载。稳定功能 API 测试类只在
+一个终态下运行，不能根据后台任务时机同时接受切流前 Conflict 和切流后 Success。迁移工作流可以复跑
+稳定的跨资源隔离 Control，但不承载普通功能全量套件或其鉴权矩阵。
+
+## 12. 历史 A2A 升级迁移场景
+
+历史 A2A 升级状态机、对账或 Runtime 双物化发生变化时，OpenAPI IT 必须按
+[历史 A2A 升级迁移规范](../ai/a2a-upgrade-migration-spec.md)冻结并记录以下单机场景：
+
+| ID | 公开场景 |
+| --- | --- |
+| `M-ST-01` | 多 Namespace、Agent、Version 和 URL/SERVICE 定义完整迁移，并保持身份、Latest、Descriptor、Declared Endpoint 和 Enable。 |
+| `M-ST-02` | `SYNCING` 期间历史 Create、Update、Set-Latest、Delete 最终收敛，不改变已经返回的历史操作结果。 |
+| `M-ST-03` | 非法 JSON、缺失 Version、非法 Name/Version 和独立标准 Agent 冲突会阻止切流，但历史读取保持可用。 |
+| `M-ST-04` | 在 Storage、Version Row 和 Resource Row 边界重启后幂等恢复，永不暴露部分 Agent。 |
+| `M-ST-05` | 切流前后，历史 A2A、Admin、Console、ARD/Search、RAD Discover 和 Watch 结果一致。 |
+| `M-ST-06` | 迁移期间，历史 gRPC 单条/批量 Endpoint Publication 同时在历史与标准 Runtime Layout 可见。 |
+| `M-ST-07` | Shadow 关闭时，切流后标准 RAD 保持可用，旧 Gateway 不再承诺可见。 |
+| `M-ST-08` | Shadow 开启时，切流后标准精确 Version RAD 与旧 Gateway 暴露等价的规范化 Runtime Snapshot。 |
+| `M-ST-09` | Mirror 故障/重试、Client Disconnect/Reconnect/Redo 和 Server Restart 最终收敛，不重复计算逻辑容量，也不丢失保留 Publication。 |
+| `M-ST-10` | Quiescing 对定义 Mutation 返回可重试迁移错误，同时 Query、Discover、Watch 和 Endpoint 操作继续。 |
+
+`test/openapi-test/A2A_MIGRATION_API_TEST_SCENARIOS.md` 分配可执行 HTTP 场景，并记录必须使用
+Java SDK 或定向集群 Fixture 的场景。测试准备可以写入文档化的历史 Config，但成功契约只使用公开
+API、重启后的耐久行为和有界轮询，不直接检查 Row，也不以固定 Sleep 作为成功条件。
+
+历史 A2A 场景遵循与 MCP 迁移相同的独立工作流边界，不能追加在稳定功能 API Job 之后执行。

@@ -1,0 +1,176 @@
+<!--
+  Copyright 1999-2026 Alibaba Group Holding Ltd.
+
+  Licensed under the Apache License, Version 2.0 (the "License");
+  you may not use this file except in compliance with the License.
+  You may obtain a copy of the License at
+
+       http://www.apache.org/licenses/LICENSE-2.0
+
+  Unless required by applicable law or agreed to in writing, software
+  distributed under the License is distributed on an "AS IS" BASIS,
+  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+  See the License for the specific language governing permissions and
+  limitations under the License.
+-->
+
+# Nacos 客户端能力协商规范
+
+本文定义 Nacos 运行时连接的客户端侧能力协商。本文展开
+[客户端运行时规范](client-runtime-spec.md)中的能力部分，并补充
+[gRPC API 规范](../grpc-api/api-spec.md)中的 setup 规则。
+
+## 1. 能力模型
+
+Ability 是按 `AbilityMode` 划分作用域的具名 boolean feature flag。
+
+| Mode | 持有方 | 目的 |
+|------|--------|------|
+| `SERVER` | Nacos server node | 描述 SDK client 或 cluster client 可见的服务端支持能力。 |
+| `SDK_CLIENT` | Runtime SDK client | 描述 SDK client 可使用或可接收的特性。 |
+| `CLUSTER_CLIENT` | Server-to-server client | 描述内部集群 client 特性。 |
+
+Ability name 在同一 mode 内必须唯一。Ability key 定义是连接两侧的兼容注册表。
+
+## 2. 当前 SDK 与服务端能力
+
+当前 Java SDK 声明支持：
+
+| SDK ability | 含义 |
+|-------------|------|
+| `SDK_CLIENT_FUZZY_WATCH` | 客户端可以使用 Config 或 Naming fuzzy watch。 |
+| `SDK_CLIENT_DISTRIBUTED_LOCK` | 客户端可以使用分布式锁功能。 |
+| `SDK_MCP_REGISTRY` | 客户端可以使用 MCP registry 运行时功能。 |
+| `SDK_AGENT_REGISTRY` | 客户端可以使用旧 A2A Agent 和 AgentCard 运行时功能。 |
+
+当前服务端声明支持：
+
+| Server ability | 含义 |
+|----------------|------|
+| `SERVER_PERSISTENT_INSTANCE_BY_GRPC` | 支持通过 gRPC 注册或注销 Naming 持久实例。 |
+| `SERVER_FUZZY_WATCH` | 支持 Config 或 Naming fuzzy watch。 |
+| `SERVER_DISTRIBUTED_LOCK` | 支持分布式锁。 |
+| `SERVER_MCP_REGISTRY` | 支持 MCP registry 操作。 |
+| `SERVER_MCP_DRAFT_RELEASE` | MCP Release 能理解 `createDraft` 字段。 |
+| `SERVER_AGENT_REGISTRY` | 支持旧 A2A Agent 和 AgentCard registry 操作。 |
+| `SERVER_AGENT_CARD_V1` | 支持 A2A AgentCard 1.0 协议字段。 |
+
+新增 ability 需要同时提供具名 key 和领域规则，说明该 ability 控制的行为。
+
+### 2.1 Agent/RAD 能力
+
+[Agent API 规范](../ai/agent-api-spec.md)为 Nacos 3.3 版本线确定下列 Server 能力位。
+它们在对应 Handler 与 Java SDK 闭环完成后加入 Server ability table。
+
+| Mode | 常量 | Wire key | 含义 |
+|---|---|---|---|
+| `SERVER` | `SERVER_RAD_V1` | `radV1` | Server 接受 Nacos 3.3 完整 RAD v1 基础契约。 |
+| `SERVER` | `SERVER_RAD_WATCH_V1` | `radWatchV1` | Server 接受 Subscribe、Unsubscribe 与 Fingerprint Hint Binding Payload。 |
+| `SDK_CLIENT` | `SDK_RAD_WATCH_V1` | `radWatchV1` | Client 接受并确认 Fingerprint Hint Push Payload。 |
+
+基础 RAD 与 Watch 是独立部署单元。当前 Connection 只有同时声明两项 Watch Ability 时
+才启用 gRPC Server-aware Watch；任一缺失或 Unknown 时不得发送 Watch Payload，使用有
+文档说明的 HTTP Watch 或本地 Discover 轮询回退。旧 `SERVER_AGENT_REGISTRY`、
+`SERVER_AGENT_CARD_V1` 和 `SDK_AGENT_REGISTRY` 继续只控制旧 A2A 契约，不作为
+任何 RAD 操作的 fallback。
+
+### 2.2 MCP Draft Release 能力
+
+| Mode | 常量 | Wire key | 含义 |
+|---|---|---|---|
+| `SERVER` | `SERVER_MCP_DRAFT_RELEASE` | `mcpDraftRelease` | 选中的 Server 能理解 `ReleaseMcpServerRequest.createDraft`，不会把它重解释为历史 Direct-online Release。 |
+
+该 Ability 不表示集群迁移已经达到 `LIFECYCLE_MANAGED`；后者仍是服务端动态前置条件。
+Client 发送 `createDraft=true` 时必须严格要求 `SUPPORTED`。`NOT_SUPPORTED` 和 `UNKNOWN`
+都在发送前返回 `SERVER_NOT_IMPLEMENTED`，不得 Fallback 或 Replay。字段缺失或为 `false` 的
+历史 Release 继续只要求 `SERVER_MCP_REGISTRY`。
+
+## 3. gRPC 协商流程
+
+运行时客户端在 gRPC connection setup 阶段协商能力：
+
+1. 客户端向选中的服务端打开 channel 并发送 `ServerCheckRequest`。
+2. 服务端返回 `ServerCheckResponse`，包含 connection id 和是否支持能力协商的标记。
+3. 客户端打开 bidirectional stream，并发送 `ConnectionSetupRequest`，携带 client version、
+   labels、namespace/tenant 和当前 client 在该 connection mode 下的能力表。
+4. 如果服务端支持能力协商，客户端等待 `SetupAckRequest`。
+5. `SetupAckRequest` 携带服务端能力表。客户端将其存入当前 connection。
+6. 如果服务端声明支持能力协商，但客户端在配置 timeout 内没有收到能力表，本次连接尝试必须放弃。
+7. 如果服务端不支持能力协商，客户端可以为了兼容完成 setup。该 connection 上的能力检查解析为
+   `UNKNOWN`，除非实现定义了显式 legacy fallback。
+
+能力状态是 connection 维度的。Reconnect 会创建新的 connection，并必须刷新能力表。
+
+## 4. 能力状态语义
+
+客户端代码观察到的能力状态包括：
+
+| 状态 | 含义 | 必须遵循的行为 |
+|------|------|----------------|
+| `SUPPORTED` | 当前 connection 显式支持该能力。 | 被该能力控制的功能可以使用优化路径或新路径。 |
+| `NOT_SUPPORTED` | 当前 connection 显式不支持该能力。 | 功能必须使用有文档说明的 fallback，或返回明确的 unsupported error。 |
+| `UNKNOWN` | 不存在能力表或 key 缺失。 | 功能不能假定支持。只有领域规范允许时，才可以使用 legacy fallback。 |
+
+Unknown 不是成功。新功能应优先返回 fail-fast unsupported error，而不是发送选中服务端可能无法理解的
+请求。
+
+## 5. 功能控制规则
+
+领域客户端使用可选或版本化能力前必须检查服务端能力：
+
+- Naming 持久实例注册仅在 `SERVER_PERSISTENT_INSTANCE_BY_GRPC` 支持时使用 gRPC；
+  否则可以使用有文档说明的 HTTP 兼容路径。
+- Config 和 Naming fuzzy watch 必须要求 `SERVER_FUZZY_WATCH`。
+- 分布式锁必须要求 `SERVER_DISTRIBUTED_LOCK`，因为该功能实验性且不保证所有服务端可用。
+- AI MCP registry 操作必须要求 `SERVER_MCP_REGISTRY`。
+- MCP Draft Release 还必须要求 `SERVER_MCP_DRAFT_RELEASE`。
+- 旧 A2A Agent 和 AgentCard 操作必须要求 `SERVER_AGENT_REGISTRY`。
+- A2A AgentCard 1.0 字段应要求 `SERVER_AGENT_CARD_V1`，或使用显式文档化的兼容转换。
+- RAD Definition Publication、Search/Discover 和 Runtime Endpoint Publication 必须要求
+  `SERVER_RAD_V1`。
+- gRPC RAD Watch 必须同时要求 `SERVER_RAD_WATCH_V1` 与 `SDK_RAD_WATCH_V1`；本地
+  轮询回退只要求基础 Discover Ability。
+
+功能代码不应把 positive ability result 缓存在当前 connection 生命周期之外。执行操作前应查询
+运行时 connection ability，或确认缓存值属于当前 connection。
+
+Reconnect 后，Client 必须重新协商能力，再恢复 Endpoint Publication 或 gRPC Wire Watch。
+Canonical Local Watch Intent 跨 Connection 保留，但全部旧 Wire Key 都要丢弃。重连后不再
+协商到 Watch 时，按照有文档说明的 Transport 或轮询路径回退。
+
+## 6. 兼容规则
+
+能力协商是混合版本兼容机制。新增运行时行为前应优先使用能力协商，而不是增加临时版本判断。版本号
+可以用于日志和诊断，但只要存在 ability key，运行时行为应优先使用 ability status。
+
+Legacy fallback 必须由领域规范说明。Fallback 的移除应遵循
+[兼容与废弃策略规范](../design/compatibility-deprecation-spec.md)。
+
+## 7. 待处理问题
+
+- 公开 ability key 列表应由源码生成，避免文档漂移。
+
+## AI Client HTTP 能力查询
+
+`GET /v3/client/ai/capabilities` 返回标准 `Result`，其中
+`data.schemaVersion=1`，`data.capabilities` 含 Boolean 键 `radV1`、`mcp`、
+`skill`、`prompt`、`agentSpec`。只声明响应节点 Client HTTP binding 的实现能力，
+不代表 gRPC 可达、全群集能力、资源权限或迁移就绪。RAD 已包含 HTTP Watch，
+不另设公开 Watch/A2A 兼容位，已有 gRPC 能力键保持原义。
+
+接口采用标准 Client 鉴权流程，元组为 `OPEN_API + AI + READ + ONLY_IDENTITY`，
+使用显式无资源 parser。有效零资源权限身份可以查询；需要 Client 鉴权时，无效或
+缺少身份仍拒绝，即使启用 AI 匿名访问。Client auth-off、插件及内部身份的标准
+跳过分支保持；Admin/Console 开关独立。额外资源参数及 Client-id 忽略，不读取资源，
+不创建或续租 Client/Publisher。
+
+SDK 对每个能力保留支持、不支持、未知三态；只有合法 schemaVersion=1 响应中的
+Boolean 才是确定证据。缺失/错误类型键为未知，忽略扩展键；未知版本、空/错误内容、
+能力路径 404/405 均不能证明没有 RAD。鉴权与连接异常保留分类。缓存有界、短 TTL、
+合并同目标并发请求，按目标 URL（含 context path/HTTP scheme）和身份摘要隔离，
+不以明文凭据作为缓存键。
+
+能力证据与实例 A2A 模式独立。可靠选择旧模式后，刷新及重连均保留到实例关闭；
+RAD 未知但旧 A2A binding 可靠可用时，可以选择旧链路，而不声称原生 RAD 不支持。
+只有未知证据不能固定旧模式。原生 RAD 使用真实业务目标证据，正常成功请求可提供
+支持证据，不能额外发探测写。C06 准备组件，旧 facade 待所有适配路径齐备后统一接通。

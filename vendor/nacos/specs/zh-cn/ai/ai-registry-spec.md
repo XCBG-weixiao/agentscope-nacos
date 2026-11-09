@@ -1,0 +1,165 @@
+<!--
+  Copyright 1999-2026 Alibaba Group Holding Ltd.
+
+  Licensed under the Apache License, Version 2.0 (the "License");
+  you may not use this file except in compliance with the License.
+  You may obtain a copy of the License at
+
+       http://www.apache.org/licenses/LICENSE-2.0
+
+  Unless required by applicable law or agreed to in writing, software
+  distributed under the License is distributed on an "AS IS" BASIS,
+  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+  See the License for the specific language governing permissions and
+  limitations under the License.
+-->
+
+# AI Registry 规范
+
+AI Registry 是 Nacos 中负责 AI 资源注册、治理、发现和分发的领域。它是 Nacos
+3.x 中与 Config、Naming 并列的一等能力。AI Registry 使用
+[资源模型规范](../design/resource-model-spec.md)中定义的共享身份：
+`namespaceId -> resourceType -> resourceName`。
+
+## 1. 范围
+
+AI Registry 负责：
+
+- AI 资源元数据、版本、标签、状态、scope、owner 和业务标签；
+- MCP Server、Agent、Prompt、Skill、AgentSpec 等资源类型契约；
+- 已支持 AI 资源的运行时查询和订阅行为；
+- draft 创建、审核、发布、强制发布、上线/下线、删除、上传、导入和下载等管理流程；
+- AI 发布流水线、存储插件、可见性、鉴权和 Trace 钩子的领域使用方式。
+
+AI Registry 不负责：
+
+- Config 资源语义，即使默认 AI 存储实现通过 Config 保存资源内容；
+- Naming service 语义，即使 MCP 或 Agent endpoint 通过 Naming service 和 instance 表达；
+- [AI Registry 适配器规范](ai-registry-adaptor-spec.md)暴露的社区 registry 协议定义；
+- 插件扩展契约。流水线、存储、资源导入、可见性和 Trace 的扩展规则由对应插件规范定义。
+
+## 2. 设计原则
+
+- **以版本为中心**：标准模型基于 `AiResource` 元数据和
+  `AiResourceVersion` 版本。新增资源类型应优先适配该模型，而不是引入自定义
+  存储形态。
+- **运行时与管理面分离**：Client API 和 SDK 应暴露运行时查询、endpoint 注册和
+  订阅。Admin、Console 和 Maintainer SDK 负责宽范围列表、上传、发布治理和删除。
+- **资源身份稳定**：`resourceType` 是第二层身份。AI 资源不应引入 Config 风格的
+  `groupName` 身份，除非兼容路径必须保留。
+- **插件组合**：可见性、存储、Trace 和发布流水线应通过插件组合，并在本领域规范中
+  建立链接。外部资源导入也应使用相同插件模型，并把导入 artifact 路由回资源
+  Operator。不应定义隐藏的 AI 专用扩展机制。
+- **允许快速演进**：AI 协议和资源格式变化很快。当 MCP、A2A、Agent 包格式或
+  模型工具生态变化时，规范可能需要不兼容或大幅调整。调整必须按照
+  [兼容与废弃策略规范](../design/compatibility-deprecation-spec.md)说明迁移、兼容和废弃行为。
+
+## 3. 标准 AI 资源模型
+
+目标标准模型为：
+
+```text
+AiResource(namespaceId, type, name)
+  -> AiResourceVersion(namespaceId, type, name, version)
+```
+
+`AiResource` 是元数据行，包含资源名、类型、描述、启用状态、namespace、owner、
+可见性 scope、业务标签、来源、乐观锁 `metaVersion`、下载次数和 `versionInfo`
+JSON。
+
+`AiResourceVersion` 是版本行，包含作者、版本、版本状态、描述、存储 JSON、
+发布流水线信息和下载次数。
+
+字段和生命周期细则参见 [AI 资源模型规范](ai-resource-model-spec.md) 和
+[AI 资源生命周期规范](ai-resource-lifecycle-spec.md)。
+
+## 4. 资源类型清单
+
+| Type | 标准身份 | 当前或已批准目标持久化形态 | 规范 |
+| --- | --- | --- | --- |
+| `mcp` | `namespaceId -> mcp -> mcpName` | 已批准目标由 `ai_resource` 和 `ai_resource_version` 托管管理生命周期，Descriptor 指向不变的 Config 内容；历史 Manifest 以及现有 Direct、Service Ref、frontend/backend 和 Runtime Naming 布局继续作为 Serving 平面。 | [MCP Server 规范](mcp-server-spec.md) |
+| `agent` | `namespaceId -> agent -> agentName` | 已批准目标为 `ai_resource`、`ai_resource_version`、AI 存储和 Naming 承载的 Runtime Endpoint publication；迁移完成前，历史 A2A 存储仍是兼容来源。 | [Agent 管理规范](agent-management-spec.md) |
+| `prompt` | `namespaceId -> prompt -> promptKey` | 使用 `ai_resource`、`ai_resource_version` 和 AI 存储；旧 Prompt 数据可迁移。 | [Prompt 规范](prompt-spec.md) |
+| `skill` | `namespaceId -> skill -> name` | 使用 `ai_resource`、`ai_resource_version`、AI 存储和轻量 discovery manifest。 | [Skill 规范](skill-spec.md) |
+| `agentspec` | `namespaceId -> agentspec -> name` | 使用 `ai_resource`、`ai_resource_version` 和 AI 存储。 | [AgentSpec 规范](agentspec-spec.md) |
+
+A2A AgentCard 是 `agent` Version 内的一种协议 binding。历史 `a2a` 资源身份和 API
+是 [A2A Agent 规范](a2a-agent-spec.md)定义的兼容 facade，不得形成第二套标准 Agent 身份。
+
+## 5. 接口面
+
+AI Registry 通过多个接口面暴露：
+
+| 接口面 | 受众 | 规则 |
+| --- | --- | --- |
+| `/v3/client/ai/...` | 运行时客户端和 Agent framework。 | 查询已知资源、下载运行时产物、订阅，以及注册客户端拥有的 endpoint。 |
+| `/v3/admin/ai/...` | 管理工具和 Maintainer SDK。 | 创建、更新、列表、发布、删除、上传和版本运维。 |
+| `/v3/console/ai/...` | Nacos 控制台。 | 围绕相同领域语义进行 UI 编排。 |
+| gRPC AI requests | Java Client SDK 运行时流量。 | 查询 AI 资源、执行 RAD 发现与订阅，并在支持时发布客户端拥有的 endpoint。 |
+| Java SDK | 运行时应用集成。 | 参见 [Java SDK 实现规范](../sdk/sdk-java-impl-spec.md)。 |
+| Java Maintainer SDK | 类型化管理集成。 | 应与 Admin API 语义和资源类型规范保持一致。 |
+| AI Registry 适配器 | 外部社区 registry 客户端。 | 独立端口上的可选兼容端点，参见 [AI Registry 适配器规范](ai-registry-adaptor-spec.md)。 |
+
+## 6. 横切规则
+
+- AI Registry API 必须遵循 [HTTP API 规范](../http-api/api-spec.md)中的 v3 响应、
+  错误、鉴权和 API 类型规则。
+- gRPC payload 必须遵循 [gRPC API 规范](../grpc-api/api-spec.md)。
+- 运行时查询和订阅应优先通过版本或 label 路由，而不是宽范围资源列表。
+- 可见性必须使用 [可见性插件规范](../auth/visibility-plugin-spec.md)。
+- 发布流水线扩展行为必须使用
+  [AI 发布流水线插件规范](../plugin/ai-pipeline-plugin-spec.md)。
+- 资源存储扩展行为必须使用 [AI 存储插件规范](../plugin/ai-storage-plugin-spec.md)。
+- 外部 AI 资源导入行为必须使用
+  [AI 资源导入插件规范](../plugin/ai-resource-import-plugin-spec.md)。导入插件负责把
+  运维配置的外部来源转换为导入 artifact；资源 Operator 负责把 artifact 应用到当前存储和
+  生命周期模型。
+- Trace 和审计事件应使用 [Trace 插件规范](../plugin/trace-plugin-spec.md)和共享
+  可观测规则。
+
+## 7. 迁移与演进事项
+
+- MCP 迁移遵循 MCP Server 规范中的异步、单向管理状态
+  `SYNCING -> LIFECYCLE_MANAGED`：只创建 Resource/Version 指针，不修改 Config 字节或
+  Naming；等待零差异对账和全节点管理能力门禁；切换后继续维护历史 Manifest 和当前 Endpoint
+  Serving 布局。该契约完成实现和验证前，Production 行为仍未落地。
+- 历史 A2A AgentCard 和 Naming endpoint 数据必须通过滚动升级方案迁移到 Agent 模型；
+  旧 API 只是投影视图，不再拥有独立资源存储。
+- Prompt 已有从旧 Config 形态 Prompt 数据迁移到标准 AI 资源模型的路径。旧映射
+  必须作为兼容存储，而不是正式 Config 资源语义。
+- RAD 返回确定性的 endpoint 集合。健康过滤、priority/weight 选择和负载均衡属于客户端策略，
+  不改变 Registry snapshot。
+- 随着 MCP、A2A 和 Agent 包生态演进，AI 资源 schema 和协议 payload 可能需要
+  大幅调整。
+
+## AI Client HTTP 能力查询
+
+`GET /v3/client/ai/capabilities` 返回标准 `Result`，其中
+`data.schemaVersion=1`，`data.capabilities` 含 Boolean 键 `radV1`、`mcp`、
+`skill`、`prompt`、`agentSpec`。只声明响应节点 Client HTTP binding 的实现能力，
+不代表 gRPC 可达、全群集能力、资源权限或迁移就绪。RAD 已包含 HTTP Watch，
+不另设公开 Watch/A2A 兼容位，已有 gRPC 能力键保持原义。
+
+接口采用标准 Client 鉴权流程，元组为 `OPEN_API + AI + READ + ONLY_IDENTITY`，
+使用显式无资源 parser。有效零资源权限身份可以查询；需要 Client 鉴权时，无效或
+缺少身份仍拒绝，即使启用 AI 匿名访问。Client auth-off、插件及内部身份的标准
+跳过分支保持；Admin/Console 开关独立。额外资源参数及 Client-id 忽略，不读取资源，
+不创建或续租 Client/Publisher。
+
+SDK 对每个能力保留支持、不支持、未知三态；只有合法 schemaVersion=1 响应中的
+Boolean 才是确定证据。缺失/错误类型键为未知，忽略扩展键；未知版本、空/错误内容、
+能力路径 404/405 均不能证明没有 RAD。鉴权与连接异常保留分类。缓存有界、短 TTL、
+合并同目标并发请求，按目标 URL（含 context path/HTTP scheme）和身份摘要隔离，
+不以明文凭据作为缓存键。
+
+能力证据与实例 A2A 模式独立。可靠选择旧模式后，刷新及重连均保留到实例关闭；
+RAD 未知但旧 A2A binding 可靠可用时，可以选择旧链路，而不声称原生 RAD 不支持。
+只有未知证据不能固定旧模式。原生 RAD 使用真实业务目标证据，正常成功请求可提供
+支持证据，不能额外发探测写。C06 准备组件，旧 facade 待所有适配路径齐备后统一接通。
+
+### 能力接口的方法边界
+
+能力控制器只声明 GET，执行标准身份校验。Spring MVC 按标准提供 HEAD（同一鉴权入口，
+不返回响应体）和 OPTIONS（仅列出允许的方法，不返回能力数据）。POST、PUT、DELETE、
+PATCH 没有业务处理方法，由框架返回普通 HTTP 405。前置方法解析将方法不匹配交回 MVC，
+不再转换为基础设施错误；其他解析异常仍报错。

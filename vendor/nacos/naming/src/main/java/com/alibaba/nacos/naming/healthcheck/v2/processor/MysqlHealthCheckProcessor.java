@@ -1,0 +1,237 @@
+/*
+ * Copyright 1999-2018 Alibaba Group Holding Ltd.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package com.alibaba.nacos.naming.healthcheck.v2.processor;
+
+import com.alibaba.nacos.api.naming.pojo.healthcheck.HealthCheckType;
+import com.alibaba.nacos.api.naming.pojo.healthcheck.impl.Mysql;
+import com.alibaba.nacos.naming.core.v2.metadata.ClusterMetadata;
+import com.alibaba.nacos.naming.core.v2.pojo.HealthCheckInstancePublishInfo;
+import com.alibaba.nacos.naming.core.v2.pojo.Service;
+import com.alibaba.nacos.naming.healthcheck.v2.HealthCheckTaskV2;
+import com.alibaba.nacos.naming.misc.GlobalExecutor;
+import com.alibaba.nacos.naming.misc.SwitchDomain;
+import com.alibaba.nacos.naming.monitor.MetricsMonitor;
+import org.springframework.stereotype.Component;
+
+import java.net.ConnectException;
+import java.net.SocketTimeoutException;
+import java.sql.Connection;
+import java.sql.DriverManager;
+import java.sql.ResultSet;
+import java.sql.SQLException;
+import java.sql.Statement;
+import java.util.Properties;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentMap;
+import java.util.concurrent.TimeoutException;
+
+import static com.alibaba.nacos.naming.misc.Loggers.SRV_LOG;
+
+/**
+ * MySQL health check processor for v2.x.
+ *
+ * <p>Current health check logic is same as v1.x. TODO refactor health check for v2.x.
+ *
+ * @author xiweng.yy
+ */
+@Component
+public class MysqlHealthCheckProcessor implements HealthCheckProcessorV2 {
+    
+    public static final String TYPE = HealthCheckType.MYSQL.name();
+    
+    private final HealthCheckCommonV2 healthCheckCommon;
+    
+    private final SwitchDomain switchDomain;
+    
+    public static final int CONNECT_TIMEOUT_MS = 500;
+    
+    // TODO: Move MySQL health check capability to a dedicated plugin so naming no longer needs mysql driver visibility.
+    private static final String CHECK_MYSQL_MASTER_SQL =
+        "show global variables where variable_name='read_only'";
+    
+    private static final String MYSQL_SLAVE_READONLY = "ON";
+    
+    private static final String CONNECT_TIMEOUT_PROPERTY = "connectTimeout";
+    
+    private static final String SOCKET_TIMEOUT_PROPERTY = "socketTimeout";
+    
+    private static final String LOGIN_TIMEOUT_PROPERTY = "loginTimeout";
+    
+    private static final String ALLOW_LOAD_LOCAL_INFILE_PROPERTY = "allowLoadLocalInfile";
+    
+    private static final String ALLOW_URL_IN_LOCAL_INFILE_PROPERTY = "allowUrlInLocalInfile";
+    
+    private static final String ALLOW_MULTI_QUERIES_PROPERTY = "allowMultiQueries";
+    
+    private static final ConcurrentMap<String, Connection> CONNECTION_POOL =
+        new ConcurrentHashMap<String, Connection>();
+    
+    public MysqlHealthCheckProcessor(HealthCheckCommonV2 healthCheckCommon,
+        SwitchDomain switchDomain) {
+        this.healthCheckCommon = healthCheckCommon;
+        this.switchDomain = switchDomain;
+    }
+    
+    @Override
+    public String getType() {
+        return TYPE;
+    }
+    
+    @Override
+    public void process(HealthCheckTaskV2 task, Service service, ClusterMetadata metadata) {
+        HealthCheckInstancePublishInfo instance = (HealthCheckInstancePublishInfo) task.getClient()
+            .getInstancePublishInfo(service);
+        if (null == instance) {
+            return;
+        }
+        SRV_LOG.debug("mysql check, ip:" + instance);
+        try {
+            // TODO handle marked(white list) logic like v1.x.
+            if (!instance.tryStartCheck()) {
+                SRV_LOG.warn(
+                    "mysql check started before last one finished, service: {} : {} : {}:{}",
+                    service.getGroupedServiceName(), instance.getCluster(), instance.getIp(),
+                    instance.getPort());
+                healthCheckCommon
+                    .reEvaluateCheckRt(task.getCheckRtNormalized() * 2, task,
+                        switchDomain.getMysqlHealthParams());
+                return;
+            }
+            GlobalExecutor
+                .executeMysqlCheckTask(new MysqlCheckTask(task, service, instance, metadata));
+            MetricsMonitor.getMysqlHealthCheckMonitor().incrementAndGet();
+        } catch (Exception e) {
+            instance.setCheckRt(switchDomain.getMysqlHealthParams().getMax());
+            healthCheckCommon.checkFail(task, service, "mysql:error:" + e.getMessage());
+            healthCheckCommon.reEvaluateCheckRt(switchDomain.getMysqlHealthParams().getMax(), task,
+                switchDomain.getMysqlHealthParams());
+        }
+    }
+    
+    private class MysqlCheckTask implements Runnable {
+        
+        private final HealthCheckTaskV2 task;
+        
+        private final Service service;
+        
+        private final HealthCheckInstancePublishInfo instance;
+        
+        private final ClusterMetadata metadata;
+        
+        private long startTime = System.currentTimeMillis();
+        
+        public MysqlCheckTask(HealthCheckTaskV2 task, Service service,
+            HealthCheckInstancePublishInfo instance,
+            ClusterMetadata metadata) {
+            this.task = task;
+            this.service = service;
+            this.instance = instance;
+            this.metadata = metadata;
+        }
+        
+        @Override
+        public void run() {
+            try {
+                String clusterName = instance.getCluster();
+                String key =
+                    service.getGroupedServiceName() + ":" + clusterName + ":" + instance.getIp()
+                        + ":" + instance
+                            .getPort();
+                Connection connection = CONNECTION_POOL.get(key);
+                Mysql config = (Mysql) metadata.getHealthChecker();
+                
+                if (connection == null || connection.isClosed()) {
+                    connection = DriverManager.getConnection(buildJdbcUrl(instance),
+                        buildConnectionProperties(config));
+                    CONNECTION_POOL.put(key, connection);
+                }
+                
+                try (Statement statement = connection.createStatement()) {
+                    statement.setQueryTimeout(1);
+                    
+                    try (ResultSet resultSet = statement.executeQuery(config.getCmd())) {
+                        int resultColumnIndex = 2;
+                        
+                        if (CHECK_MYSQL_MASTER_SQL.equals(config.getCmd())) {
+                            resultSet.next();
+                            if (MYSQL_SLAVE_READONLY
+                                .equals(resultSet.getString(resultColumnIndex))) {
+                                throw new IllegalStateException("current node is slave!");
+                            }
+                        }
+                    }
+                }
+                
+                healthCheckCommon.checkOk(task, service, "mysql:+ok");
+                healthCheckCommon.reEvaluateCheckRt(System.currentTimeMillis() - startTime, task,
+                    switchDomain.getMysqlHealthParams());
+            } catch (SQLException e) {
+                // fail immediately
+                healthCheckCommon.checkFailNow(task, service, "mysql:" + e.getMessage());
+                healthCheckCommon.reEvaluateCheckRt(switchDomain.getHttpHealthParams().getMax(),
+                    task,
+                    switchDomain.getMysqlHealthParams());
+            } catch (Throwable t) {
+                Throwable cause = t;
+                int maxStackDepth = 50;
+                for (int depth = 0; depth < maxStackDepth && cause != null; depth++) {
+                    if (cause instanceof SocketTimeoutException || cause instanceof ConnectException
+                        || cause instanceof TimeoutException
+                        || cause.getCause() instanceof TimeoutException) {
+                        
+                        healthCheckCommon.checkFail(task, service,
+                            "mysql:timeout:" + cause.getMessage());
+                        healthCheckCommon.reEvaluateCheckRt(task.getCheckRtNormalized() * 2, task,
+                            switchDomain.getMysqlHealthParams());
+                        return;
+                    }
+                    
+                    cause = cause.getCause();
+                }
+                
+                // connection error, probably not reachable
+                healthCheckCommon.checkFail(task, service, "mysql:error:" + t.getMessage());
+                healthCheckCommon.reEvaluateCheckRt(switchDomain.getMysqlHealthParams().getMax(),
+                    task,
+                    switchDomain.getMysqlHealthParams());
+            } finally {
+                instance.setCheckRt(System.currentTimeMillis() - startTime);
+            }
+        }
+    }
+    
+    static String buildJdbcUrl(HealthCheckInstancePublishInfo instance) {
+        return "jdbc:mysql://" + instance.getIp() + ":" + instance.getPort();
+    }
+    
+    static Properties buildConnectionProperties(Mysql config) {
+        Properties properties = new Properties();
+        if (config.getUser() != null) {
+            properties.setProperty("user", config.getUser());
+        }
+        if (config.getPwd() != null) {
+            properties.setProperty("password", config.getPwd());
+        }
+        properties.setProperty(CONNECT_TIMEOUT_PROPERTY, String.valueOf(CONNECT_TIMEOUT_MS));
+        properties.setProperty(SOCKET_TIMEOUT_PROPERTY, String.valueOf(CONNECT_TIMEOUT_MS));
+        properties.setProperty(LOGIN_TIMEOUT_PROPERTY, "1");
+        properties.setProperty(ALLOW_LOAD_LOCAL_INFILE_PROPERTY, Boolean.FALSE.toString());
+        properties.setProperty(ALLOW_URL_IN_LOCAL_INFILE_PROPERTY, Boolean.FALSE.toString());
+        properties.setProperty(ALLOW_MULTI_QUERIES_PROPERTY, Boolean.FALSE.toString());
+        return properties;
+    }
+}
