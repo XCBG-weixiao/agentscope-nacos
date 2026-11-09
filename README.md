@@ -2,6 +2,8 @@
 
 Friday 是一个由 DeepSeek 驱动的 AgentScope Agent。它通过 A2A 1.0 提供 JSON-RPC 服务。Nacos 发布它的 Agent Card，并根据实例的注册和心跳维护可用端点。客户端从 Nacos 发现端点后直接调用 Friday。运行轨迹由 Friday 保存，可按 A2A `contextId` 查询。
 
+同一个 Nacos 也可以注册开源 Codex CLI。安装、启动、注册和调用步骤见 [Codex A2A 部署文档](CODEX.md)。
+
 | 组件 | 本机入口 |
 | --- | --- |
 | Friday A2A JSON-RPC | `http://127.0.0.1:9999/` |

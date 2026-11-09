@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Friday · 会话轨迹</title>
+  <title>{{ agent_name }} · 会话轨迹</title>
   <style>
     :root { color-scheme: light dark; font: 15px system-ui, sans-serif; }
     body { max-width: 1200px; margin: auto; padding: 28px 20px; }
@@ -31,7 +31,7 @@
 </head>
 <body>
   <header>
-    <h1>Friday · 会话轨迹</h1>
+    <h1>{{ agent_name }} · 会话轨迹</h1>
     <p>使用 A2A 返回的 <code>contextId</code> 查会话。每轮记录包含它自己的 A2A <code>taskId</code>。</p>
     <form action="/traces" method="get">
       <label for="session_id">会话 ID</label>

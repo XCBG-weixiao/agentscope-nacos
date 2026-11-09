@@ -1,4 +1,4 @@
-"""Persist and display the AgentScope events for each A2A execution."""
+"""Persist and display agent events for each A2A execution."""
 
 import asyncio
 import json
@@ -42,8 +42,9 @@ def now() -> str:
 
 
 class TraceStore:
-    def __init__(self, path: Path) -> None:
+    def __init__(self, path: Path, agent_name: str = "Friday") -> None:
         self.path = path.expanduser()
+        self.agent_name = agent_name
         self.active_runs: set[str] = set()
         self.path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         self.path.touch(mode=0o600, exist_ok=True)
@@ -116,6 +117,7 @@ class TraceStore:
 
         return TEMPLATES.TemplateResponse(
             request, "trace_view.html", {
+                "agent_name": self.agent_name,
                 "session_id": session_id,
                 "sessions": [
                     {**dict(session), "url": "/traces?" + urlencode({"session_id": session["session_id"]})}

@@ -175,8 +175,12 @@ def create_app(
         ],
     )
     traces = TraceStore(trace_db)
+    return create_a2a_app(card, AgentScopeExecutor(model, api_key, traces), traces)
+
+
+def create_a2a_app(card: AgentCard, executor: AgentExecutor, traces: TraceStore) -> Starlette:
     handler = DefaultRequestHandler(
-        agent_executor=AgentScopeExecutor(model=model, api_key=api_key, traces=traces),
+        agent_executor=executor,
         task_store=InMemoryTaskStore(),
         agent_card=card,
     )
@@ -184,7 +188,7 @@ def create_app(
         *create_agent_card_routes(card),
         *create_jsonrpc_routes(handler, rpc_url="/"),
     ]
-    if urlsplit(base_url).hostname in {"127.0.0.1", "localhost", "::1"}:
+    if urlsplit(card.supported_interfaces[0].url).hostname in {"127.0.0.1", "localhost", "::1"}:
         routes.append(Route("/traces", traces.view, methods=["GET"]))
     return Starlette(routes=routes)
 
