@@ -4,7 +4,7 @@
 
 ## 1. 安装并登录 Codex
 
-在 macOS 或 Linux 上准备 Node.js 和 npm。按主文档[安装 Python 依赖](README.md#1-准备环境)并[启动 Nacos 3.3.0](README.md#3-启动-nacos-330)。以下命令从集成仓库根目录用 Bash 执行。Codex 使用自己的登录凭据，可独立于 Friday 运行。
+在 macOS 或 Linux 上准备 Node.js 和 npm。按 Nacos 方案文档[安装 Python 依赖](NACOS.md#1-准备环境)并[启动 Nacos 3.3.0](NACOS.md#3-启动-nacos-330)。以下命令从集成仓库根目录用 Bash 执行。Codex 使用自己的登录凭据，可独立于 Friday 运行。
 
 ```bash
 npm install -g @openai/codex@0.167.0

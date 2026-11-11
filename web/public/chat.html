@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>与 Friday 对话</title>
+  <link rel="stylesheet" href="chat.css">
+  <script src="chat.js" defer></script>
+</head>
+<body>
+  <header>
+    <span class="avatar" aria-hidden="true">F</span>
+    <div class="identity"><h1>Friday</h1><p>AgentScope 助手</p></div>
+    <button id="reset" class="header-action" type="button">新对话</button>
+    <button id="close" class="header-action close" type="button" aria-label="收起聊天">×</button>
+  </header>
+  <main id="conversation" aria-label="对话">
+    <section class="welcome" id="welcome">
+      <p class="greeting">你好，我是 Friday。</p>
+      <p>你可以让我解释概念、整理想法，或者起草一段文字。</p>
+      <button class="suggestion" type="button">你能帮我做什么？</button>
+    </section>
+    <ol id="messages" role="log" aria-label="聊天记录"></ol>
+    <p id="status" role="status" hidden></p>
+    <p id="error" role="alert" hidden></p>
+  </main>
+  <footer>
+    <form id="composer">
+      <textarea id="message" placeholder="输入消息…" aria-label="消息" rows="2" maxlength="4000" required></textarea>
+      <button class="send" type="submit" id="send" aria-label="发送消息">↑</button>
+    </form>
+    <details id="session" hidden><summary>会话 ID</summary><code id="context"></code></details>
+  </footer>
+</body>
+</html>

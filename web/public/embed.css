@@ -1,0 +1,51 @@
+:host { all: initial; }
+:host([hidden]), [hidden] { display: none !important; }
+
+.launcher, iframe {
+  position: fixed;
+  right: max(18px, env(safe-area-inset-right));
+  z-index: 2147483000;
+}
+
+.launcher {
+  bottom: max(18px, env(safe-area-inset-bottom));
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 11px 16px;
+  min-height: 48px;
+  background: #183b31;
+  color: #fff;
+  border: 1px solid #ffffff29;
+  border-radius: 28px;
+  box-shadow: 0 8px 28px #11251d33;
+  cursor: pointer;
+  font: 600 14px system-ui, sans-serif;
+}
+.launcher:hover { background: #245140; }
+.launcher:focus-visible { outline: 3px solid #8bb69e; outline-offset: 3px; }
+.bubble {
+  background: #dff1b6;
+  color: #183b31;
+  border-radius: 8px 8px 8px 2px;
+  padding: 0 4px;
+  line-height: 15px;
+  letter-spacing: 1px;
+  font-size: 9px;
+}
+
+iframe {
+  bottom: calc(max(18px, env(safe-area-inset-bottom)) + 62px);
+  width: min(408px, calc(100vw - 36px));
+  height: min(630px, calc(100dvh - 100px));
+  box-sizing: border-box;
+  background: #f8f9f3;
+  border: 1px solid #36504233;
+  border-radius: 20px;
+  box-shadow: 0 16px 56px #11251d30;
+}
+
+@media (max-width: 480px) {
+  .launcher, iframe { right: max(12px, env(safe-area-inset-right)); }
+  iframe { width: calc(100vw - 24px); }
+}

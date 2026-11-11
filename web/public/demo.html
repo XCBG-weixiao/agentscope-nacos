@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Friday 网页聊天演示</title>
+  <link rel="stylesheet" href="/demo.css">
+  <script src="/demo.js" defer></script>
+  <script src="/embed.js" defer></script>
+</head>
+<body>
+  <header class="site-header">
+    <span class="mark" aria-hidden="true">F</span>
+    <span class="brand">Friday</span>
+    <span class="subhead">网页聊天演示</span>
+  </header>
+  <main>
+    <h1>网页里的 Friday</h1>
+    <p class="lead">点击右下角的「问 Friday」，就能在当前网页和 AgentScope 助手对话。</p>
+    <section aria-labelledby="embed-title">
+      <div class="embed-head">
+        <h2 id="embed-title">嵌入你的网站</h2>
+        <button id="copy" type="button">复制代码</button>
+      </div>
+      <p>把这一行放进目标网页的 HTML，并将网站的源加入 Node 服务的 <code>EMBED_ORIGINS</code>。</p>
+      <pre><code id="snippet"></code></pre>
+      <p id="copy-status" role="status" hidden></p>
+    </section>
+  </main>
+</body>
+</html>

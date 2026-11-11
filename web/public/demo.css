@@ -1,0 +1,25 @@
+:root { font: 16px/1.65 Inter, system-ui, -apple-system, sans-serif; background: #f6f7ee; color: #24352c; }
+* { box-sizing: border-box; }
+body { margin: 0; }
+.site-header { display: flex; align-items: center; gap: 10px; padding: 19px clamp(20px, 5vw, 68px); border-bottom: 1px solid #dbe3d7; }
+.mark { display: grid; place-items: center; width: 34px; height: 34px; border-radius: 10px; color: #e3f2bd; background: #183b31; font: 700 20px Fraunces, Georgia, serif; }
+.brand { font-size: 18px; font-weight: 650; }
+.subhead { margin-left: auto; color: #56685c; font-size: 13px; }
+main { width: min(710px, calc(100% - 40px)); margin: clamp(42px, 9vw, 115px) auto 100px; }
+h1, h2, p { margin-top: 0; }
+h1 { font: 500 clamp(36px, 7vw, 66px)/1.18 Fraunces, Georgia, "Songti SC", serif; letter-spacing: -.03em; margin-bottom: 15px; }
+.lead { font-size: 18px; color: #43594d; margin-bottom: 36px; }
+section { background: #fff; border: 1px solid #dbe3d7; border-radius: 18px; padding: clamp(16px, 4vw, 28px); }
+.embed-head { display: flex; justify-content: space-between; align-items: center; gap: 10px; margin-bottom: 10px; }
+h2 { font-size: 18px; margin-bottom: 0; }
+section p { font-size: 14px; color: #43594d; }
+pre { margin-bottom: 0; border-radius: 9px; padding: 13px; overflow-x: auto; background: #eef3e6; }
+code { font: 13px/1.65 "IBM Plex Mono", ui-monospace, monospace; }
+button { color: #183b31; border: 1px solid #bacbbd; background: #fff; border-radius: 8px; padding: 6px 12px; font: inherit; font-size: 13px; white-space: nowrap; cursor: pointer; }
+button:hover { background: #eef3e6; }
+button:focus-visible { outline: 2px solid #5d8f74; outline-offset: 2px; }
+#copy-status { margin: 8px 0 0; }
+
+@media (min-width: 1100px) {
+  main { margin-left: clamp(32px, 10vw, 160px); width: min(710px, calc(90vw - 450px)); }
+}

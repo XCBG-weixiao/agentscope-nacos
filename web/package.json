@@ -1,0 +1,6 @@
+{
+  "name": "agentscope-web-chat",
+  "private": true,
+  "engines": { "node": ">=20" },
+  "scripts": { "start": "node server.mjs" }
+}

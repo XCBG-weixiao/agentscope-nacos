@@ -1,0 +1,44 @@
+:root {
+  font: 14px/1.55 Inter, system-ui, -apple-system, sans-serif;
+  color: #23332c;
+  background: #f8f9f3;
+}
+* { box-sizing: border-box; }
+body { display: flex; flex-direction: column; margin: 0; height: 100dvh; }
+button, textarea { font: inherit; }
+button { cursor: pointer; }
+button:disabled { cursor: default; opacity: .48; }
+button:focus-visible, summary:focus-visible { outline: 2px solid #5d8f74; outline-offset: 2px; }
+[hidden] { display: none !important; }
+
+header { display: flex; align-items: center; gap: 11px; padding: 15px 17px; color: #fff; background: #183b31; }
+.avatar { display: grid; place-items: center; width: 36px; height: 36px; background: #dff1b6; color: #183b31; border-radius: 11px; font: 700 21px Fraunces, Georgia, serif; }
+.identity { flex: 1; min-width: 0; }
+h1, .identity p { margin: 0; }
+h1 { font-size: 16px; }
+.identity p { color: #c3d7cc; font-size: 11px; }
+.header-action { background: transparent; border: 1px solid #ffffff35; border-radius: 8px; color: inherit; padding: 4px 8px; font-size: 12px; white-space: nowrap; }
+.header-action:hover:not(:disabled) { background: #ffffff20; }
+.close { border-color: transparent; font-size: 23px; line-height: 1; padding: 3px 6px; }
+
+main { flex: 1; min-height: 0; overflow: auto; padding: 20px 17px; }
+.welcome { background: #eef3e6; border: 1px solid #dbe6d5; border-radius: 14px; padding: 15px 16px; }
+.welcome p { margin: 0 0 8px; }
+.greeting { font-size: 17px; font-weight: 650; }
+.suggestion { background: #fff; border: 1px solid #d3dfce; color: #29483b; border-radius: 16px; padding: 5px 11px; margin-top: 3px; font-size: 12px; }
+.suggestion:hover { border-color: #739582; }
+#messages { list-style: none; margin: 0; padding: 0; display: grid; gap: 12px; }
+.message { max-width: 91%; width: fit-content; white-space: pre-wrap; overflow-wrap: anywhere; border-radius: 12px; padding: 9px 12px; }
+.user { justify-self: end; background: #dfead9; border-bottom-right-radius: 3px; }
+.assistant { justify-self: start; background: #fff; border: 1px solid #e4e9e0; border-bottom-left-radius: 3px; }
+#status { font-size: 12px; color: #4b6355; }
+#error { color: #852d24; background: #fff1ee; border: 1px solid #f0d5cc; border-radius: 9px; padding: 7px 10px; }
+
+footer { background: #f8f9f3; border-top: 1px solid #dde5da; padding: 12px 16px 13px; }
+form { display: flex; gap: 8px; align-items: flex-end; border: 1px solid #cfdbd1; border-radius: 13px; padding: 7px; background: #fff; }
+form:focus-within { border-color: #638772; }
+textarea { width: 100%; resize: none; border: 0; outline: none; color: inherit; padding: 4px; background: transparent; }
+.send { width: 36px; height: 36px; flex: none; border: 0; border-radius: 9px; color: #fff; background: #183b31; font-size: 21px; line-height: 1; }
+.send:hover:not(:disabled) { background: #245140; }
+details { color: #4c6557; font-size: 11px; margin: 6px 2px 0; overflow-wrap: anywhere; }
+summary { cursor: pointer; width: fit-content; }
